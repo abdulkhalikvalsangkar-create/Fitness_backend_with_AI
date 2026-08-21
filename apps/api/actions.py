@@ -15,9 +15,11 @@ from fastapi import HTTPException
 from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 
-from apps.api.security import Principal, require_admin
+from apps.api.security import Principal, authenticate, require_admin
+from packages.auth.service import AuthService, AuthServiceError
 from packages.cache import CacheService
 from packages.config import get_settings
+from packages.domain.auth import FirebaseExchangeRequest, LogoutRequest, RefreshRequest
 from packages.domain.enums import ConsentScope, JobType
 from packages.domain.models import Attachment
 from packages.orchestrator import new_state, run_turn, total_latency_ms
@@ -32,6 +34,14 @@ logger = logging.getLogger(__name__)
 
 Handler = Callable[[dict, Principal, Session], dict[str, Any]]
 _actions: dict[str, Handler] = {}
+
+
+def _auth_error(exc: AuthServiceError) -> HTTPException:
+    return HTTPException(status_code=401, detail=str(exc), headers={"WWW-Authenticate": "Bearer"})
+
+
+def _auth_payload(body: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in body.items() if key != "action"}
 
 
 def action(name: str) -> Callable[[Handler], Handler]:
@@ -57,6 +67,59 @@ def _parse_date(value: Any, field: str) -> date:
         return datetime.fromisoformat(str(value)).date()
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"{field}: expected ISO date") from exc
+
+
+# --------------------------------------------------------------------------
+# authentication actions — dispatched by the same POST / envelope
+# --------------------------------------------------------------------------
+
+
+@action("auth.firebase_exchange")
+def handle_firebase_exchange(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
+    try:
+        request = FirebaseExchangeRequest.model_validate(_auth_payload(body))
+        result = AuthService(session).exchange_firebase_token(
+            request.firebase_id_token,
+            device_id=request.device_id,
+            device_name=request.device_name,
+            platform=request.platform,
+            app_version=request.app_version,
+        )
+    except AuthServiceError as exc:
+        raise _auth_error(exc) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid authentication request: {exc}") from exc
+    return {"action": "auth.firebase_exchange", **result.model_dump(mode="json")}
+
+
+@action("auth.refresh")
+def handle_auth_refresh(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
+    try:
+        request = RefreshRequest.model_validate(_auth_payload(body))
+        result = AuthService(session).refresh(request.refresh_token, request.device_id)
+    except AuthServiceError as exc:
+        raise _auth_error(exc) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid refresh request: {exc}") from exc
+    return {"action": "auth.refresh", **result.model_dump(mode="json")}
+
+
+@action("auth.logout")
+def handle_auth_logout(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
+    try:
+        request = LogoutRequest.model_validate(_auth_payload(body))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid logout request: {exc}") from exc
+    service = AuthService(session)
+    revoked = service.logout_all(principal.user_id) if request.all_devices else int(
+        service.logout(principal.user_id, request.refresh_token)
+    )
+    return {"action": "auth.logout", "revoked": revoked}
+
+
+@action("auth.logout_all")
+def handle_auth_logout_all(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
+    return {"action": "auth.logout_all", "revoked": AuthService(session).logout_all(principal.user_id)}
 
 
 # --------------------------------------------------------------------------

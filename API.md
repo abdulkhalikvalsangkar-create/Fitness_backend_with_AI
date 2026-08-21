@@ -13,15 +13,17 @@ Method     POST /          everything
 
 ## 1. Authentication
 
-Firebase ID tokens are exchanged for backend tokens through:
+Authentication also uses the single `POST /` endpoint. The `action` value
+selects the authentication operation:
 
 ```http
-POST /auth/exchange
+POST /
 Content-Type: application/json
 ```
 
 ```json
 {
+  "action": "auth.firebase_exchange",
   "firebase_id_token": "<firebase-id-token>",
   "device_id": "stable-device-id",
   "platform": "android",
@@ -30,9 +32,37 @@ Content-Type: application/json
 ```
 
 The response contains a short-lived backend `access_token` and a rotated,
-database-backed `refresh_token`. Use the access token for normal `POST /`
-actions. Refresh with `POST /auth/refresh`, revoke the current device with
-`POST /auth/logout`, and revoke all devices with `POST /auth/logout-all`.
+database-backed `refresh_token`.
+
+Authentication actions have different requirements:
+
+| action | credential required |
+|---|---|
+| `auth.firebase_exchange` | Firebase ID token; no backend JWT |
+| `auth.refresh` | refresh token; no backend JWT |
+| `auth.logout` | backend JWT and refresh token |
+| `auth.logout_all` | backend JWT |
+
+Example refresh:
+
+```json
+{
+  "action": "auth.refresh",
+  "refresh_token": "<refresh-token>"
+}
+```
+
+Example logout:
+
+```json
+{
+  "action": "auth.logout",
+  "refresh_token": "<refresh-token>"
+}
+```
+
+Both logout actions require the backend bearer token. Normal actions such as
+`chat`, `memory`, `scan`, `upload`, and `sync` also require that token.
 
 Send a bearer JWT on every request.
 

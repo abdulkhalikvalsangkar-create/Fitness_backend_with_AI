@@ -67,10 +67,9 @@ class AuthTokenTests(unittest.TestCase):
 
 class AuthIntegrationShapeTests(unittest.TestCase):
     def test_auth_routes_are_registered(self) -> None:
-        routes = {route.path for route in app.routes}
-        self.assertTrue(
-            {"/auth/exchange", "/auth/refresh", "/auth/logout", "/auth/logout-all"}.issubset(routes)
-        )
+        routes = {(route.path, method) for route in app.routes for method in (route.methods or ())}
+        self.assertIn(("/", "POST"), routes)
+        self.assertNotIn(("/auth/exchange", "POST"), routes)
 
     def test_auth_session_migration_is_discovered(self) -> None:
         versions = {migration.version for migration in migrate.discover()}

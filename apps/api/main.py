@@ -17,9 +17,8 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from apps.api.auth import router as auth_router
 from apps.api.actions import action_names, get_action
-from apps.api.security import authenticate, enforce_rate_limit
+from apps.api.security import Principal, authenticate, enforce_rate_limit
 from packages.config import get_settings
 from packages.storage.db import ping, server_info, session_scope
 
@@ -47,8 +46,6 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-User-Id", "X-Admin-Token", "X-Request-Id"],
     max_age=600,
 )
-
-app.include_router(auth_router)
 
 # JSON bodies carry text only — attachments arrive as multipart file parts, so
 # 2 MB is generous for a conversation turn. It used to also have to hold
@@ -237,10 +234,14 @@ async def unified_endpoint(request: Request) -> JSONResponse:
             detail=f"unknown action '{action_name}'. Known: {', '.join(action_names())}",
         )
 
-    principal = authenticate(request, body)
-
     with session_scope() as session:
-        enforce_rate_limit(request, principal, session)
+        if action_name in {"auth.firebase_exchange", "auth.refresh"}:
+            # These actions establish or renew a backend session and therefore
+            # must not require an access JWT first.
+            principal = Principal(user_id="", auth_method=action_name)
+        else:
+            principal = authenticate(request, body)
+            enforce_rate_limit(request, principal, session)
         result = handler(body, principal, session)
 
     return JSONResponse(

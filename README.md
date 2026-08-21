@@ -23,6 +23,9 @@ Everything is `POST /`, discriminated by `action` (default `chat`). `GET /` retu
 status. This matches the shape the old `app.py` exposed, so existing clients keep the
 same URL.
 
+Authentication uses the same endpoint with `auth.firebase_exchange`, `auth.refresh`,
+`auth.logout`, and `auth.logout_all`; see `flutter_jwt.md` for the client contract.
+
 ```jsonc
 POST /
 Authorization: Bearer <jwt>
@@ -125,7 +128,7 @@ was dropped mid-import:
 
 ```bash
 python scripts/init_db.py --mark-applied   # records them, then verifies
-python scripts/init_db.py --verify         # 31 tables expected
+  python scripts/init_db.py --verify         # 32 tables expected
 ```
 
 > **If you imported before 2026-08-04, re-import.** Three columns used MySQL
