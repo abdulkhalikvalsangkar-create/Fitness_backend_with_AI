@@ -222,6 +222,7 @@ Authorization: Bearer <jwt>
 Content-Type: multipart/form-data; boundary=...
 
 action=scan
+scan_type=product
 message=can I eat this?
 file=<binary jpeg/png>
 ```
@@ -229,6 +230,7 @@ file=<binary jpeg/png>
 ```js
 const fd = new FormData();
 fd.append("action", "scan");
+fd.append("scan_type", "product");
 fd.append("message", "can I eat this?");
 fd.append("file", photoBlob, "label.jpg");     // repeat "file" for several frames
 
@@ -238,6 +240,15 @@ await fetch(BASE, { method: "POST", headers: { Authorization: `Bearer ${jwt}` },
 - File field: `file` (also accepted: `files`, `image`, `images`, `attachment`,
   `attachments`). **Repeat the field** for multiple frames — several angles of
   the same pack improve barcode confidence through multi-frame voting.
+- `scan_type` accepts exactly `product` or `restaurant`. Use `product` for both
+  barcode and ingredient-label images; the existing ProductAnalyzer tries the
+  barcode first and falls back to OCR/ingredient analysis.
+- Use `restaurant` for a restaurant scan. It selects the restaurant analyzer
+  even when an image is attached. A restaurant name or place identifier should
+  be included in `message` so the background investigation has a query.
+- If `scan_type` is omitted, the old behavior remains: attachments select the
+  product analyzer, while text containing restaurant/place and review or
+  hygiene intent selects the restaurant analyzer.
 - Max **8 MB per file**, **5 files**.
 - Accepted: `image/jpeg`, `image/png`, `image/webp`, `image/heic`,
   `application/pdf`.

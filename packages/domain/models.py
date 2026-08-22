@@ -71,6 +71,7 @@ class RequestInfo(Base):
 class InputData(Base):
     text: str = ""
     attachments: list[Attachment] = Field(default_factory=list)
+    scan_type: Optional[Literal["product", "restaurant"]] = None
     client_hints: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -21,8 +21,9 @@ from apps.api.security import _decode_jwt
 from apps.api.actions import _answer_source
 from packages.auth.tokens import create_access_token, create_refresh_token, hash_refresh_token
 from packages.domain.auth import FirebaseExchangeRequest
-from packages.domain.enums import BlockType
+from packages.domain.enums import BlockType, RouteLabel, RouteStage
 from packages.domain.models import AnswerBlock, AnswerPayload
+from packages.orchestrator.router import Router
 from packages.storage import migrate
 
 
@@ -89,6 +90,18 @@ class AuthIntegrationShapeTests(unittest.TestCase):
             blocks=[AnswerBlock(block_id="personal_1", type=BlockType.TEXT)]
         )
         self.assertEqual(_answer_source(State()), "llm")
+
+    def test_explicit_scan_types_and_keyword_route(self) -> None:
+        router = Router.__new__(Router)
+        product = router._stage_rules("", has_attachments=True, scan_type="product")
+        restaurant = router._stage_rules("", has_attachments=True, scan_type="restaurant")
+        keyword = router._stage_rules("is this restaurant safe", has_attachments=False)
+
+        self.assertEqual(product.label, RouteLabel.PRODUCT)
+        self.assertEqual(product.stage, RouteStage.S0_RULES)
+        self.assertEqual(restaurant.label, RouteLabel.RESTAURANT)
+        self.assertEqual(restaurant.stage, RouteStage.S0_RULES)
+        self.assertEqual(keyword.label, RouteLabel.RESTAURANT)
 
 
 if __name__ == "__main__":

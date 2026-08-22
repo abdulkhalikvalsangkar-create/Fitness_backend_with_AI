@@ -75,6 +75,7 @@ def new_state(
     locale: str = "en",
     jurisdiction: str = "IN",
     client_version: Optional[str] = None,
+    scan_type: Optional[str] = None,
     client_hints: Optional[dict] = None,
 ) -> ConversationState:
     return ConversationState(
@@ -89,6 +90,7 @@ def new_state(
         input=InputData(
             text=message,
             attachments=attachments or [],
+            scan_type=scan_type,
             client_hints=client_hints or {},
         ),
     )

@@ -245,6 +245,7 @@ def route(state: ConversationState, session: Session) -> ConversationState:
         state.input.text,
         locale=state.request.locale,
         has_attachments=bool(state.input.attachments),
+        scan_type=state.input.scan_type,
     )
     state.route = outcome.decision
     state.candidates.faq_hits = outcome.faq_hits

@@ -95,6 +95,7 @@ class Router:
         *,
         locale: str = "en",
         has_attachments: bool = False,
+        scan_type: Optional[str] = None,
     ) -> RouterOutcome:
         normalised = normalise_question(text)
         flags = self._safety_triage(text)
@@ -112,7 +113,9 @@ class Router:
                 safety_flags=flags,
             )
 
-        s0 = self._stage_rules(normalised, has_attachments=has_attachments)
+        s0 = self._stage_rules(
+            normalised, has_attachments=has_attachments, scan_type=scan_type
+        )
         if s0 is not None:
             return RouterOutcome(decision=s0, faq_hits=[], safety_flags=flags)
 
@@ -176,13 +179,31 @@ class Router:
             )
         return flags
 
-    def _stage_rules(self, normalised: str, *, has_attachments: bool) -> Optional[RouteDecision]:
-        if has_attachments:
+    def _stage_rules(
+        self,
+        normalised: str,
+        *,
+        has_attachments: bool,
+        scan_type: Optional[str] = None,
+    ) -> Optional[RouteDecision]:
+        if scan_type == "restaurant":
+            return RouteDecision(
+                label=RouteLabel.RESTAURANT,
+                confidence=1.0,
+                stage=RouteStage.S0_RULES,
+                rationale="explicit scan_type=restaurant",
+            )
+
+        if scan_type in {"product", "restaurant"} or has_attachments:
             return RouteDecision(
                 label=RouteLabel.PRODUCT,
                 confidence=0.99,
                 stage=RouteStage.S0_RULES,
-                rationale="attachments present",
+                rationale=(
+                    "explicit scan_type=product"
+                    if scan_type == "product"
+                    else "attachments present"
+                ),
                 category=FaqCategory.PRODUCT,
             )
 

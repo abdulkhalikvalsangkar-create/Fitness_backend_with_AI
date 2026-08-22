@@ -189,6 +189,7 @@ def handle_chat(body: dict, principal: Principal, session: Session) -> dict[str,
         locale=body.get("locale") or "en",
         jurisdiction=body.get("jurisdiction") or "IN",
         client_version=body.get("client_version"),
+        scan_type=body.get("scan_type"),
         client_hints=body.get("client_hints") or {},
     )
 
@@ -528,7 +529,23 @@ def handle_scan(body: dict, principal: Principal, session: Session) -> dict[str,
     because the scanner screen wants the structured analysis without a
     conversational turn wrapped around it.
     """
-    result = handle_chat({**body, "action": "chat", "message": body.get("message") or ""}, principal, session)
+    scan_type = str(body.get("scan_type") or "product").lower()
+    if scan_type not in {"product", "restaurant"}:
+        raise HTTPException(
+            status_code=400,
+            detail="scan_type must be 'product' or 'restaurant'",
+        )
+
+    result = handle_chat(
+        {
+            **body,
+            "action": "chat",
+            "message": body.get("message") or "",
+            "scan_type": scan_type,
+        },
+        principal,
+        session,
+    )
     result["action"] = "scan"
     return result
 
