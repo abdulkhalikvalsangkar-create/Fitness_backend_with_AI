@@ -18,8 +18,11 @@ from pydantic import ValidationError
 
 from apps.api.main import app
 from apps.api.security import _decode_jwt
+from apps.api.actions import _answer_source
 from packages.auth.tokens import create_access_token, create_refresh_token, hash_refresh_token
 from packages.domain.auth import FirebaseExchangeRequest
+from packages.domain.enums import BlockType
+from packages.domain.models import AnswerBlock, AnswerPayload
 from packages.storage import migrate
 
 
@@ -74,6 +77,18 @@ class AuthIntegrationShapeTests(unittest.TestCase):
     def test_auth_session_migration_is_discovered(self) -> None:
         versions = {migration.version for migration in migrate.discover()}
         self.assertIn("003_auth_sessions", versions)
+
+    def test_answer_source_identifies_faq_and_llm_blocks(self) -> None:
+        class State:
+            payload = AnswerPayload(
+                blocks=[AnswerBlock(block_id="faq_1", type=BlockType.FAQ_ANSWER)]
+            )
+
+        self.assertEqual(_answer_source(State()), "faq")
+        State.payload = AnswerPayload(
+            blocks=[AnswerBlock(block_id="personal_1", type=BlockType.TEXT)]
+        )
+        self.assertEqual(_answer_source(State()), "llm")
 
 
 if __name__ == "__main__":

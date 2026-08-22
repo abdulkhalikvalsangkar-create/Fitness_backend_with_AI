@@ -44,6 +44,22 @@ def _auth_payload(body: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in body.items() if key != "action"}
 
 
+def _answer_source(state: Any) -> str:
+    """Identify the final answer producer, including FAQ fall-throughs."""
+    payload = state.payload
+    if payload is None:
+        return "unknown"
+
+    if any(block.type.value == "faq_answer" for block in payload.blocks):
+        return "faq"
+
+    llm_block_ids = {"personal_1", "research_1", "explain_1"}
+    if any(block.block_id in llm_block_ids for block in payload.blocks):
+        return "llm"
+
+    return "system"
+
+
 def action(name: str) -> Callable[[Handler], Handler]:
     def decorator(func: Handler) -> Handler:
         _actions[name] = func
@@ -199,6 +215,7 @@ def handle_chat(body: dict, principal: Principal, session: Session) -> dict[str,
             "confidence": state.route.confidence if state.route else 0.0,
             "stage": str(state.route.stage.value) if state.route else None,
         },
+        "source": _answer_source(state),
         "cache": str(state.telemetry.cache_status.value),
         "pending_jobs": pending_jobs,
         "latency_ms": total_latency_ms(state),

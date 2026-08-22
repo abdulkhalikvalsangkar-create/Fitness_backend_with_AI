@@ -181,11 +181,26 @@ Treat anything other than `"ok"` as not ready.
     "data_gaps": []
   },
   "route": { "label": "FAQ", "confidence": 0.95, "stage": "S1_EXACT" },
+  "source": "faq",
   "cache": "MISS",
   "pending_jobs": [],
   "latency_ms": 412
 }
 ```
+
+`source` identifies who produced the final answer:
+
+| source | meaning |
+|---|---|
+| `faq` | final answer came from a stored FAQ template |
+| `llm` | final answer contains an LLM-generated response |
+| `system` | deterministic system/rules response, such as smalltalk or safety |
+
+`route.stage` identifies where routing decided the request (`S0_RULES`,
+`S1_EXACT`, `S2_EMBEDDING`, `S3_SEMANTIC_CACHE`, `S4_LLM`, or `FALLBACK`). It
+is separate from `source`: for example, an FAQ route may fall through to an
+LLM because required personalisation data is missing. `cache` separately
+identifies whether the response was served from L1, L2, L3, or a cache miss.
 
 **Render `payload.blocks`, not `message`.** `message` is a flattened fallback
 for notifications and accessibility. The blocks carry the structure.
