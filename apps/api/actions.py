@@ -143,6 +143,51 @@ def handle_auth_logout_all(body: dict, principal: Principal, session: Session) -
 # --------------------------------------------------------------------------
 
 
+def _is_document_question(message: str) -> bool:
+    if not isinstance(message, str):
+        return False
+
+    lowered = message.lower()
+    doc_terms = (
+        "report",
+        "document",
+        "lab report",
+        "medical report",
+        "test report",
+        "blood report",
+        "medical document",
+        "uploaded report",
+        "attached report",
+        "uploaded document",
+        "attached document",
+        "uploaded file",
+        "attached file",
+        "lab result",
+        "test result",
+        "scan result",
+        "results",
+        "prescription",
+    )
+    product_terms = (
+        "product",
+        "ingredient",
+        "barcode",
+        "nutrition facts",
+        "label",
+        "pack",
+        "ingredients",
+        "safety",
+        "allergy",
+        "is this safe",
+        "is this product",
+    )
+
+    has_doc_term = any(term in lowered for term in doc_terms)
+    has_product_term = any(term in lowered for term in product_terms)
+    has_context = any(term in lowered for term in ("this", "my", "uploaded", "attached"))
+    return has_doc_term and has_context and not has_product_term
+
+
 @action("chat")
 def handle_chat(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
     # Accept the legacy shape too: the old client sent {messages:[...], context:{...}}.
@@ -171,6 +216,22 @@ def handle_chat(body: dict, principal: Principal, session: Session) -> dict[str,
         )
 
     raw_attachments = _materialise_attachments(raw_attachments, principal, session)
+
+    if raw_attachments and _is_document_question(message):
+        repo = HealthRepository(session, principal.user_id)
+        for item in raw_attachments:
+            attachment_id = (item or {}).get("attachment_id") if isinstance(item, dict) else None
+            if not attachment_id:
+                continue
+            extracted = repo.extracted_info_for_attachment(attachment_id)
+            if extracted:
+                message = (
+                    "User uploaded document text:\n"
+                    f"{extracted}\n\n"
+                    f"Question: {message}"
+                )
+                raw_attachments = []
+                break
 
     attachments: list[Attachment] = []
     for item in raw_attachments:
@@ -470,6 +531,18 @@ def handle_upload(body: dict, principal: Principal, session: Session) -> dict[st
                 declared_mime=declared or sniffed_mime,
                 kind="upload",
             )
+
+            try:
+                from packages.product.ocr import OcrService
+
+                result = OcrService(session).read(raw)
+                if result and result.ok and result.text.strip():
+                    HealthRepository(session, principal.user_id).upsert_extracted_info(
+                        blob.blob_id,
+                        result.text,
+                    )
+            except Exception:
+                logger.exception("ocr extraction failed for uploaded blob %s", blob.blob_id)
         except ValueError as exc:
             # One bad attachment must not sink the others.
             errors.append({"index": index, "error": str(exc)})

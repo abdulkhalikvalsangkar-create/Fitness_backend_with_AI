@@ -290,6 +290,19 @@ class HealthRepository:
         ).mappings().all()
         return {r["activity_type"]: float(r["total"] or 0) for r in rows}
 
+    def extracted_info_for_attachment(self, blob_id: str) -> Optional[str]:
+        row = self.session.execute(
+            text(
+                "SELECT extracted_info FROM medical_report "
+                "WHERE user_id = :uid AND source_blob_id = :blob "
+                "ORDER BY report_date DESC, id DESC LIMIT 1"
+            ),
+            {"uid": self.user_id, "blob": blob_id},
+        ).mappings().first()
+        if not row:
+            return None
+        return row["extracted_info"] or None
+
     def latest_medical(self) -> MedicalSnapshot:
         row = self.session.execute(
             text(
@@ -362,6 +375,48 @@ class HealthRepository:
                 "src": source[:64],
             },
         )
+
+    def upsert_extracted_info(self, blob_id: str, extracted_text: str) -> None:
+        """Persist OCR text for the most recent medical report row for this user.
+
+        This keeps the stored document text alongside the structured medical data
+        rather than forcing the later QA flow to re-read the blob from disk.
+        """
+        text_value = (extracted_text or "").strip()
+        if not text_value:
+            return
+
+        today = date.today()
+        existing_id = self.session.execute(
+            text(
+                "SELECT id FROM medical_report WHERE user_id = :uid AND report_date = :d "
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            {"uid": self.user_id, "d": today},
+        ).scalar()
+
+        params = {
+            "uid": self.user_id,
+            "blob": blob_id,
+            "info": text_value[: 16 * 1024 * 1024],
+        }
+
+        if existing_id is not None:
+            self.session.execute(
+                text(
+                    "UPDATE medical_report SET source_blob_id = :blob, "
+                    "extracted_info = :info WHERE id = :rid AND user_id = :uid"
+                ),
+                {**params, "rid": existing_id},
+            )
+        else:
+            self.session.execute(
+                text(
+                    "INSERT INTO medical_report (user_id, report_date, source_blob_id, extracted_info) "
+                    "VALUES (:uid, :d, :blob, :info)"
+                ),
+                {**params, "d": today},
+            )
 
     def merge_medical(
         self,

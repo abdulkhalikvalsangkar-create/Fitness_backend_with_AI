@@ -134,7 +134,6 @@ CREATE TABLE IF NOT EXISTS activity_session (
   CONSTRAINT fk_activity_user FOREIGN KEY (user_id) REFERENCES app_user (user_id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Lab values are the most sensitive class: separate table, separate consent scope.
 CREATE TABLE IF NOT EXISTS medical_report (
   id           BIGINT       NOT NULL AUTO_INCREMENT,
   user_id      VARCHAR(64)  NOT NULL,
@@ -150,6 +149,7 @@ CREATE TABLE IF NOT EXISTS medical_report (
   allergies    JSON         NULL,
   medications  JSON         NULL,
   source_blob_id VARCHAR(64) NULL,
+  extracted_info MEDIUMTEXT  NULL,
   created_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (id),
   KEY ix_medical_lookup (user_id, report_date DESC),
