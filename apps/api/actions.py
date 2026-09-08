@@ -46,6 +46,69 @@ def _auth_payload(body: dict[str, Any]) -> dict[str, Any]:
 
 def _answer_source(state: Any) -> str:
     """Identify the final answer producer, including FAQ fall-throughs."""
+    payload = state.payload
+    if payload is None:
+        return "unknown"
+
+    if any(block.type.value == "faq_answer" for block in payload.blocks):
+        return "faq"
+
+    llm_block_ids = {"personal_1", "research_1", "explain_1"}
+    if any(block.block_id in llm_block_ids for block in payload.blocks):
+        return "llm"
+
+    return "system"
+
+
+def action(name: str) -> Callable[[Handler], Handler]:
+    def decorator(func: Handler) -> Handler:
+        _actions[name] = func
+        return func
+
+    return decorator
+
+
+def get_action(name: str) -> Optional[Handler]:
+    return _actions.get(name)
+
+
+def action_names() -> list[str]:
+    return sorted(_actions)
+
+
+def _parse_date(value: Any, field: str) -> date:
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.fromisoformat(str(value)).date()
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"{field}: expected ISO date") from exc
+
+
+# --------------------------------------------------------------------------
+# authentication actions — dispatched by the same POST / envelope
+# --------------------------------------------------------------------------
+
+
+@action("auth.firebase_exchange")
+def handle_firebase_exchange(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
+    try:
+        request = FirebaseExchangeRequest.model_validate(_auth_payload(body))
+        result = AuthService(session).exchange_firebase_token(
+            request.firebase_id_token,
+            device_id=request.device_id,
+            device_name=request.device_name,
+            platform=request.platform,
+            app_version=request.app_version,
+        )
+    except AuthServiceError as exc:
+        raise _auth_error(exc) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid authentication request: {exc}") from exc
+    return {"action": "auth.firebase_exchange", **result.model_dump(mode="json")}
+
+
+@action("auth.refresh")
 def handle_auth_refresh(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
     try:
         request = RefreshRequest.model_validate(_auth_payload(body))
