@@ -113,6 +113,15 @@ class JobRepository:
         ).mappings().first()
         return _to_record(dict(row)) if row else None
 
+    def add_dependency(self, parent_job_id: str, child_job_id: str) -> None:
+        self.session.execute(
+            text(
+                "INSERT IGNORE INTO job_dependency (parent_job_id, child_job_id) "
+                "VALUES (:parent, :child)"
+            ),
+            {"parent": parent_job_id, "child": child_job_id},
+        )
+
     def claim(self, worker_id: str, batch_size: int = 5, lease_seconds: int = 600) -> list[JobRecord]:
         token = uuid.uuid4().hex
         lease_until = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
@@ -129,6 +138,19 @@ class JobRepository:
                 WHERE status = 'queued'
                   AND available_at <= UTC_TIMESTAMP(3)
                   AND attempts < max_attempts
+                                    AND (
+                                        job_type <> 'product_scan'
+                                        OR NOT EXISTS (
+                                            SELECT 1
+                                            FROM job_dependency dep
+                                            JOIN (
+                                                SELECT job_id, status
+                                                FROM job
+                                            ) child ON child.job_id = dep.child_job_id
+                                            WHERE dep.parent_job_id = job.job_id
+                                                AND child.status IN ('queued', 'running')
+                                        )
+                                    )
                 ORDER BY priority ASC, created_at ASC
                 LIMIT :lim
                 """

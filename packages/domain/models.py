@@ -290,6 +290,7 @@ class HazardFinding(Base):
 
     chemical_id: str
     display_name: str
+    review_status: str = "draft"
     hazard_level: HazardLevel = HazardLevel.UNKNOWN
     ghs_codes: list[str] = Field(default_factory=list)
     iarc_group: Optional[str] = None

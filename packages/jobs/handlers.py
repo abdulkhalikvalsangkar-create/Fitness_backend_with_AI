@@ -11,14 +11,87 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import text
+
 from packages.domain.enums import JobType
+from packages.domain.models import UserContext
 from packages.jobs.registry import JobContext, handler
 from packages.storage.repositories.cache import CacheRepository
 from packages.storage.repositories.health import HealthRepository
 from packages.storage.repositories.jobs import JobRepository
+from packages.storage.repositories.admin_settings import AdminSettingRepository
 from packages.storage.repositories.ratelimit import RateLimitRepository
 
 logger = logging.getLogger(__name__)
+
+
+@handler(JobType.PRODUCT_SCAN)
+def rerun_product_scan(ctx: JobContext) -> dict[str, Any]:
+    """Rerun a product scan after all chemical research children finish."""
+    from packages.product import ProductAnalyzer
+    from packages.storage.blobs import BlobStore
+
+    dependencies = ctx.session.execute(
+        text(
+            "SELECT child.job_id, child.status, child.error "
+            "FROM job_dependency dep "
+            "JOIN job child ON child.job_id = dep.child_job_id "
+            "WHERE dep.parent_job_id = :parent"
+        ),
+        {"parent": ctx.job_id},
+    ).mappings().all()
+    if not dependencies:
+        raise ValueError(f"product_scan {ctx.job_id} has no child jobs")
+
+    active = [
+        row["job_id"]
+        for row in dependencies
+        if row["status"] in {"queued", "running"}
+    ]
+    if active:
+        raise ValueError(f"product scan dependencies are not terminal: {active[0]}")
+
+    user_id = str(ctx.payload.get("user_id") or ctx.user_id or "")
+    attachment_ids = ctx.payload.get("attachment_ids") or []
+    if not user_id or not attachment_ids:
+        raise ValueError("product_scan requires user_id and attachment_ids")
+
+    store = BlobStore(ctx.session)
+    images: list[bytes] = []
+    for attachment_id in attachment_ids:
+        blob = store.get(str(attachment_id), user_id=user_id)
+        if blob is None:
+            raise ValueError(f"attachment not found: {attachment_id}")
+        images.append(blob.read())
+
+    context_payload = ctx.payload.get("context")
+    context = UserContext.model_validate(context_payload) if context_payload else None
+    analysis, trace = ProductAnalyzer(
+        ctx.session,
+        user_id=user_id,
+        jurisdiction=str(ctx.payload.get("jurisdiction") or "IN"),
+    ).analyze(
+        images,
+        context=context,
+        product_class=ctx.payload.get("product_class"),
+        attachment_ids=attachment_ids,
+        scan_id=ctx.payload.get("scan_id"),
+        enqueue_research=False,
+    )
+    from packages.orchestrator.templates import product_blocks
+
+    failed_dependencies = [
+        row["job_id"] for row in dependencies if row["status"] == "failed"
+    ]
+
+    return {
+        "status": "completed",
+        "scan_type": "product",
+        "analysis": analysis.model_dump(mode="json"),
+        "blocks": [block.model_dump(mode="json") for block in product_blocks(analysis)],
+        "failed_dependencies": failed_dependencies,
+        "trace": trace.__dict__,
+    }
 
 
 @handler(JobType.CONTEXT_AGGREGATE)
@@ -228,20 +301,39 @@ def capture_profile(ctx: JobContext) -> dict[str, Any]:
 @handler(JobType.CHEMICAL_RESEARCH)
 def research_chemical(ctx: JobContext) -> dict[str, Any]:
     """arch.md 8.4: an unknown ingredient enqueues here rather than blocking
-    the scan. The dossier lands as `draft` for review before it is published."""
+    the scan. The dossier is ingested as `draft`, then may be explicitly
+    published according to the admin review-control setting."""
     from packages.etl.chemical import ChemicalEtl
 
     token = ctx.require("token")
-    outcome = ChemicalEtl(ctx.session).ingest(str(token), with_evidence=True)
+    etl = ChemicalEtl(ctx.session)
+    outcome = etl.ingest(str(token), with_evidence=True)
 
     if not outcome.ok:
         # Not raised: "PubChem does not know this ingredient" is a legitimate
         # result, not a failure to retry three times.
         return {"token": token, "status": "not_found", "reason": outcome.error}
 
+    review_mode = (
+        AdminSettingRepository(ctx.session).get("review_status_control") or "manual"
+    ).strip().lower()
+    published_automatically = False
+    if review_mode == "automatic":
+        published_automatically = etl.review(
+            outcome.chemical_id,
+            reviewer="auto",
+            mode="automatic",
+        )
+    elif review_mode != "manual":
+        logger.warning(
+            "unknown review_status_control=%r; keeping chemical %s as draft",
+            review_mode,
+            outcome.chemical_id,
+        )
+
     return {
         "token": token,
-        "status": "drafted",
+        "status": "published" if published_automatically else "drafted",
         "chemical_id": outcome.chemical_id,
         "created": outcome.created,
         "synonyms": outcome.synonyms_added,
@@ -249,7 +341,9 @@ def research_chemical(ctx: JobContext) -> dict[str, Any]:
         "evidence": outcome.evidence_added,
         "external_calls": outcome.external_calls,
         "notes": outcome.notes,
-        "review_required": True,
+        "review_required": not published_automatically,
+        "review_status_control": review_mode,
+        "reviewed_by": "auto" if published_automatically else None,
     }
 
 

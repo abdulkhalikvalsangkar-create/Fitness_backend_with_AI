@@ -178,6 +178,7 @@ class HazardRulesEngine:
         finding = HazardFinding(
             chemical_id=ingredient.chemical_id or "",
             display_name=display,
+            review_status=str(dossier.get("review_status") or "draft"),
             hazard_level=baseline,
             evidence=evidence or [],
             rules_version=RULES_VERSION,

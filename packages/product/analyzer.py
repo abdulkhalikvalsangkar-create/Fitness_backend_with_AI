@@ -97,6 +97,9 @@ class ProductAnalyzer:
         *,
         context: Optional[UserContext] = None,
         product_class: Optional[str] = None,
+        attachment_ids: Optional[list[str]] = None,
+        scan_id: Optional[str] = None,
+        enqueue_research: bool = True,
     ) -> tuple[ProductAnalysis, AnalysisTrace]:
         trace = AnalysisTrace()
         analysis = ProductAnalysis()
@@ -143,9 +146,15 @@ class ProductAnalyzer:
 
         # -- unknowns become jobs, not a blocked turn (arch.md 8.4) --------
         unresolved = [i for i in analysis.ingredients if not i.resolved]
-        if unresolved:
+        if unresolved and enqueue_research:
             analysis.pending_chemical_ids = [i.raw_token for i in unresolved]
-            analysis.pending_job_ids = self._enqueue_research(unresolved)
+            analysis.pending_job_ids = self._enqueue_research(
+                unresolved,
+                attachment_ids=attachment_ids or [],
+                context=context,
+                scan_id=scan_id,
+                product_class=resolved_class,
+            )
 
         from packages.config import get_settings
 
@@ -307,7 +316,15 @@ class ProductAnalyzer:
         keys = [a.lower().strip() for a in context.medical.allergies if a]
         return self.chemicals.cross_reactants(keys)
 
-    def _enqueue_research(self, unresolved: list[ResolvedIngredient]) -> list[str]:
+    def _enqueue_research(
+        self,
+        unresolved: list[ResolvedIngredient],
+        *,
+        attachment_ids: list[str],
+        context: Optional[UserContext],
+        scan_id: Optional[str],
+        product_class: str,
+    ) -> list[str]:
         job_ids: list[str] = []
         for ingredient in _research_priority(unresolved)[:10]:
             token = ingredient.raw_token.strip()
@@ -324,7 +341,27 @@ class ProductAnalyzer:
                     idempotency_key=f"chem:{token.lower()[:150]}",
                 )
             )
-        return job_ids
+
+        if not job_ids:
+            return []
+
+        parent_id = self.jobs.enqueue(
+            job_type=JobType.PRODUCT_SCAN,
+            payload={
+                "attachment_ids": attachment_ids,
+                "user_id": self.user_id,
+                "scan_type": "product",
+                "jurisdiction": self.jurisdiction,
+                "product_class": product_class,
+                "scan_id": scan_id,
+                "context": context.model_dump(mode="json") if context else None,
+            },
+            user_id=self.user_id,
+            priority=180,
+        )
+        for child_id in job_ids:
+            self.jobs.add_dependency(parent_id, child_id)
+        return [parent_id]
 
 
 # Ingredient panels are ordered by weight, so the first entries are bulk

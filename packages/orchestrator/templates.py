@@ -379,6 +379,12 @@ def product_blocks(analysis: "ProductAnalysis") -> list[AnswerBlock]:
                 "recognised": ingredient.resolved,
                 "resolution": str(ingredient.resolution_method.value),
                 "confidence": ingredient.confidence,
+                "review_status": hazard.review_status if hazard else "draft",
+                "review_label": (
+                    "unverified / pending review"
+                    if hazard and hazard.review_status != "published"
+                    else None
+                ),
                 "hazard_level": str(hazard.hazard_level.value) if hazard else "unknown",
                 "iarc_group": hazard.iarc_group if hazard else None,
                 "endocrine": hazard.endocrine_flag if hazard else False,

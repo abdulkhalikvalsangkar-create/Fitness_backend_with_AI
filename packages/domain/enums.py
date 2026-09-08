@@ -155,6 +155,7 @@ class SourceTier(StrEnum):
 
 class JobType(StrEnum):
     CHEMICAL_RESEARCH = "chemical_research"
+    PRODUCT_SCAN = "product_scan"
     DEEP_RESEARCH = "deep_research"
     RESTAURANT_INVESTIGATION = "restaurant_investigation"
     MEMORY_SUMMARISE = "memory_summarise"

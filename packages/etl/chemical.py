@@ -264,16 +264,26 @@ class ChemicalEtl:
 
         return added
 
-    def review(self, chemical_id: str, reviewer: str) -> bool:
-        """Promote a reviewed dossier to published."""
+    def _set_status(self, chemical_id: str, mode: str, reviewer: str) -> bool:
+        if mode == "manual":
+            reviewed_by = f"manual:{reviewer}"[:191]
+        elif mode == "automatic":
+            reviewed_by = "auto"
+        else:
+            raise ValueError("review mode must be 'manual' or 'automatic'")
+
         result = self.session.execute(
             sql(
                 "UPDATE chemical SET review_status = 'published', reviewed_by = :who, "
                 "reviewed_at = UTC_TIMESTAMP(3) WHERE chemical_id = :cid"
             ),
-            {"who": reviewer[:191], "cid": chemical_id},
+            {"who": reviewed_by, "cid": chemical_id},
         )
         return (result.rowcount or 0) > 0
+
+    def review(self, chemical_id: str, reviewer: str, mode: str = "manual") -> bool:
+        """Promote a dossier and record whether approval was manual or automatic."""
+        return self._set_status(chemical_id, mode, reviewer)
 
     def pending_review(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self.session.execute(

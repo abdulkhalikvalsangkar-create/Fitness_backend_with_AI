@@ -582,7 +582,12 @@ def product_analyzer(state: ConversationState, session: Session) -> Conversation
         user_id=state.request.user_id,
         jurisdiction=state.request.jurisdiction,
     )
-    analysis, trace = analyzer.analyze(images, context=state.context)
+    analysis, trace = analyzer.analyze(
+        images,
+        context=state.context,
+        attachment_ids=[a.attachment_id for a in state.input.attachments],
+        scan_id=state.request.turn_id,
+    )
     state.candidates.analyzer_result = analysis
 
     logger.info(
