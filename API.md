@@ -256,11 +256,30 @@ await fetch(BASE, { method: "POST", headers: { Authorization: `Bearer ${jwt}` },
   field containing a JSON object.
 - Sending files with **no** `action` defaults to `scan`.
 
+The scan request waits for the product-scan parent job and its chemical-research
+children to reach a terminal state before returning. The completed parent
+result is placed in the response blocks. If the worker does not finish within
+`SCAN_WAIT_SECONDS`, the API returns `504` with the pending job IDs.
+
 Response is the same shape as `chat`, with product-specific blocks.
 
 > **Scans take 20–30 seconds.** Barcode decode, OCR, resolution, rules and an
 > LLM explanation. Set your client timeout to at least 60 s and show real
 > progress, not a spinner that looks hung.
+
+The backend defaults are:
+
+```env
+JOB_BATCH_SIZE=10
+SCAN_WAIT_SECONDS=120
+SCAN_POLL_SECONDS=1
+```
+
+The cPanel worker cron must be running during this wait:
+
+```cron
+* * * * * cd /home/USER/fitness-api && /home/USER/virtualenv/fitness-api/3.12/bin/python -m apps.worker.worker --once >> /home/USER/worker.log 2>&1
+```
 
 ---
 

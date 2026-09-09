@@ -257,7 +257,7 @@ class JobSettings:
     poll_interval_seconds: float = field(
         default_factory=lambda: _env_float("JOB_POLL_INTERVAL", 3.0)
     )
-    batch_size: int = field(default_factory=lambda: _env_int("JOB_BATCH_SIZE", 5))
+    batch_size: int = field(default_factory=lambda: _env_int("JOB_BATCH_SIZE", 10))
     max_attempts: int = field(default_factory=lambda: _env_int("JOB_MAX_ATTEMPTS", 3))
     lease_seconds: int = field(default_factory=lambda: _env_int("JOB_LEASE_SECONDS", 600))
     result_ttl_seconds: int = field(
@@ -266,6 +266,12 @@ class JobSettings:
     # A cPanel cron tick should exit rather than run forever.
     max_runtime_seconds: int = field(
         default_factory=lambda: _env_int("JOB_MAX_RUNTIME_SECONDS", 0)
+    )
+    scan_wait_seconds: int = field(
+        default_factory=lambda: _env_int("SCAN_WAIT_SECONDS", 120)
+    )
+    scan_poll_seconds: float = field(
+        default_factory=lambda: _env_float("SCAN_POLL_SECONDS", 1.0)
     )
 
 
