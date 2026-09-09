@@ -8,6 +8,7 @@ holds business logic — it adapts the envelope to the packages that do.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, datetime
 from typing import Any, Callable, Optional
 
@@ -23,6 +24,7 @@ from packages.domain.auth import FirebaseExchangeRequest, LogoutRequest, Refresh
 from packages.domain.enums import ConsentScope, JobType
 from packages.domain.models import Attachment
 from packages.orchestrator import new_state, run_turn, total_latency_ms
+from packages.storage.db import session_scope
 from packages.storage.repositories.cache import CacheRepository
 from packages.storage.repositories.conversation import ConversationRepository
 from packages.storage.repositories.faq import FaqRepository
@@ -623,7 +625,71 @@ def handle_scan(body: dict, principal: Principal, session: Session) -> dict[str,
         principal,
         session,
     )
+    result = _complete_scan_jobs(result, principal, session)
     result["action"] = "scan"
+    return result
+
+
+def _complete_scan_jobs(
+    result: dict[str, Any], principal: Principal, session: Session
+) -> dict[str, Any]:
+    """Wait for scan parent jobs and replace provisional blocks with the result."""
+    pending = [str(job_id) for job_id in result.get("pending_jobs") or []]
+    if not pending:
+        return result
+
+    settings = get_settings().jobs
+    # Publish the parent and child rows before a separate worker transaction
+    # is allowed to claim them. The surrounding request scope remains usable.
+    session.commit()
+    deadline = time.monotonic() + max(1, settings.scan_wait_seconds)
+    completed: list[dict[str, Any]] = []
+
+    while pending and time.monotonic() < deadline:
+        with session_scope() as poll_session:
+            jobs = [
+                JobRepository(poll_session).get(job_id, principal.user_id)
+                for job_id in pending
+            ]
+
+        missing = [pending[index] for index, job in enumerate(jobs) if job is None]
+        if missing:
+            raise HTTPException(status_code=500, detail=f"scan jobs not found: {', '.join(missing)}")
+
+        failed = [job for job in jobs if job.status.value == "failed"]
+        if failed:
+            detail = failed[0].error or f"scan job {failed[0].job_id} failed"
+            raise HTTPException(status_code=502, detail=detail[:1000])
+
+        pending = [
+            job.job_id
+            for job in jobs
+            if job.status.value not in {"succeeded", "cancelled"}
+        ]
+        completed = [job.result or {} for job in jobs if job.status.value == "succeeded"]
+        if pending:
+            time.sleep(max(0.1, settings.scan_poll_seconds))
+
+    if pending:
+        raise HTTPException(
+            status_code=504,
+            detail={"error": "scan jobs did not finish before timeout", "job_ids": pending},
+        )
+
+    # A product scan parent returns authoritative structured blocks. Keep the
+    # original response envelope and replace only its provisional scan data.
+    if completed and isinstance(completed[0].get("blocks"), list):
+        payload = dict(result.get("payload") or {})
+        payload["blocks"] = completed[0]["blocks"]
+        payload["source"] = "system"
+        result["payload"] = payload
+        result["message"] = "\n\n".join(
+            str(block.get("text"))
+            for block in completed[0]["blocks"]
+            if isinstance(block, dict) and block.get("text")
+        ).strip()
+    result["pending_jobs"] = []
+    result["scan_job_results"] = completed
     return result
 
 
