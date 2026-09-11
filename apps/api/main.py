@@ -209,9 +209,14 @@ async def _body_from_multipart(request: Request) -> dict[str, Any]:
 
     if files:
         body["attachments"] = files
-        # Sending files at all means the caller wants them handled; `chat`
-        # would silently ignore them if no action was named.
-        body.setdefault("action", "scan")
+        # Only default to `scan` when no action was provided at all AND the
+        # provided action isn't one of the explicit file-accepting actions.
+        file_actions = {"scan", "upload", "biological_age_calculator"}
+        explicit = body.get("action")
+        if not explicit:
+            body["action"] = "scan"
+        elif str(explicit) not in file_actions:
+            body["action"] = str(explicit)
 
     return body
 

@@ -353,6 +353,94 @@ Idempotent — metrics upsert on `(user, metric, date, source)`. Safe to re-send
 
 ---
 
+### `biological_age_calculator` — biological age from ENMO CSV
+
+**Multipart recommended.** Accepts one CSV file with ENMO timeseries
+(time + ENMO columns). Also works with JSON referencing a pre-stored
+`attachment_id`.
+
+**Multipart request:**
+
+```js
+const fd = new FormData();
+fd.append("action", "biological_age_calculator");
+fd.append("chronological_age", "45");
+fd.append("gender", "male");
+fd.append("return_features", "false");
+fd.append("file", csvBlob, "enmo_sample.csv");
+
+await fetch(BASE, { method: "POST", headers: { Authorization: `Bearer ${jwt}` }, body: fd });
+```
+
+**Form fields:**
+
+| field | required | value |
+|---|---|---|
+| `action` | ✅ | literal `biological_age_calculator` |
+| `chronological_age` | ✅ | number, 0 – 120 (years) |
+| `gender` | ✅ | `male` / `M` / `female` / `F` |
+| `return_features` | | boolean; default `false`. Set to `true` to also receive raw cosinor, nonparam, PA and sleep features in the response. |
+| `file` | ✅ | a single CSV with at least a timestamp column and an ENMO (mg) column. Columns are auto-detected — common names `time`/`timestamp` + `enmo_mg`/`enmo`. First/second column are used as fallback. |
+
+Max **8 MB per file**, **1 file** (extras are ignored; first file used).
+
+**JSON (pre-stored attachment):**
+
+```jsonc
+{
+  "action": "biological_age_calculator",
+  "chronological_age": 45,
+  "gender": "male",
+  "return_features": false,
+  "attachments": [{ "attachment_id": "5095aa07..." }]
+}
+```
+
+**Response:**
+
+```jsonc
+{
+  "success": true,
+  "request_id": "...",
+  "action": "biological_age_calculator",
+  "predicted_biological_age": 47.83,
+  "chronological_age": 45.0,
+  "gender": "male",
+  "biological_age_advance": 2.83,
+  "cosinor_features": {
+    "mesor": 35.6214,
+    "amplitude": 28.4571,
+    "acrophase": 3.1416
+  },
+  "data_summary": {
+    "days_covered": 7.25
+  }
+  // when return_features=true, also:
+  // "features": { "cosinor": {...}, "nonparam": {...},
+  //               "physical_activity": {...}, "sleep": {...} }
+}
+```
+
+| field | meaning |
+|---|---|
+| `predicted_biological_age` | CosinorAge predicted biological age in years |
+| `chronological_age` | echoed input, for convenience |
+| `gender` | normalised to `male` / `female` |
+| `biological_age_advance` | `predicted - chronological` — positive = older than years, negative = younger |
+| `cosinor_features.*` | mesor / amplitude / acrophase from the 24-h cosinor fit |
+| `data_summary.days_covered` | estimated days of timeseries actually processed |
+
+**Error status codes specific to this action:**
+
+| status | meaning |
+|---|---|
+| 400 | input validation (age out of range, bad gender, missing file, file too large, attachment not found) |
+| 422 | data quality — CSV loaded but CosinorAge could not produce a prediction (insufficient coverage, wear detection rejected too much, etc.) — retry with more/days-better data |
+| 503 | biological age module dependencies unavailable (deploy missing `cosinorage`, etc.) |
+| 500 | internal processing error — `request_id` is your trace |
+
+---
+
 ### `consent` — required before health data is used
 
 Call this **first**, during onboarding, before `sync`.
@@ -604,6 +692,7 @@ action           purpose                          content-type
 chat             conversational turn              json
 scan             analyse product images           multipart
 upload           store images, get handles        multipart
+biological_age_calculator  biological age from ENMO CSV  multipart or json
 sync             push health data                 json
 consent          grant/revoke/list scopes         json
 context          what the assistant knows         json

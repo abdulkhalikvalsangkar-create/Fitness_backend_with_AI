@@ -37,3 +37,20 @@ httpx>=0.27                      # also the transport for the fetch broker
 opencv-python-headless>=4.9
 zxing-cpp>=2.2
 Pillow>=10.0
+
+# biological age dependencies
+pandas==2.2.3
+scipy==1.14.1
+scikit-learn==1.6.1
+python-dateutil==2.9.0.post0
+pytz==2026.1
+tzdata==2026.1
+scikit-digital-health==0.17.18
+statsmodels==0.14.4
+CosinorPy==3.1
+seaborn==0.13.2
+matplotlib==3.9.4
+claid==0.6.4
+protobuf==4.25.3
+grpcio==1.59.3
+cosinorage==1.0.8

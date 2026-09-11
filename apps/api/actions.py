@@ -811,6 +811,154 @@ def handle_context(body: dict, principal: Principal, session: Session) -> dict[s
 
 
 # --------------------------------------------------------------------------
+# biological age calculator
+# --------------------------------------------------------------------------
+
+
+@action("biological_age_calculator")
+def handle_biological_age_calculator(
+    body: dict, principal: Principal, session: Session
+) -> dict[str, Any]:
+    """Calculate biological age from wearable ENMO CSV timeseries.
+
+    The app POSTs this through the same unified endpoint with
+    action=biological_age_calculator and either a stored attachment_id or a
+    raw multipart file as first attachment.
+    """
+    import os
+    import tempfile
+
+    try:
+        from packages.biological_age import calculate_biological_age
+    except Exception as exc:
+        logger.exception("biological age package import failed")
+        raise HTTPException(
+            status_code=503,
+            detail="biological age calculator module is unavailable",
+        ) from exc
+
+    try:
+        chronological_age = float(body.get("chronological_age"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="chronological_age: required, must be a number between 0 and 120",
+        ) from exc
+    if not (0 < chronological_age <= 120):
+        raise HTTPException(
+            status_code=400,
+            detail="chronological_age: must be between 0 and 120 years",
+        )
+
+    gender = body.get("gender")
+    if not isinstance(gender, str) or not gender.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="gender: required, use 'male'/'M' or 'female'/'F'",
+        )
+
+    return_features = bool(body.get("return_features", False))
+
+    raw_attachments = body.get("attachments") or []
+    if not isinstance(raw_attachments, list) or not raw_attachments:
+        raise HTTPException(
+            status_code=400,
+            detail="attachments: required, provide exactly one CSV file",
+        )
+
+    first = raw_attachments[0]
+    csv_bytes: bytes | None = None
+
+    if isinstance(first, dict):
+        if isinstance(first.get("bytes"), (bytes, bytearray)):
+            csv_bytes = bytes(first["bytes"])
+        elif first.get("attachment_id"):
+            from packages.storage.blobs import BlobStore
+
+            try:
+                blob = BlobStore(session).get(str(first["attachment_id"]), principal.user_id)
+                csv_bytes = blob.data
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=404,
+                    detail="attachment not found or not accessible",
+                ) from exc
+
+    if csv_bytes is None or len(csv_bytes) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="attachments[0]: no CSV bytes could be resolved",
+        )
+
+    allowed_sizes = get_settings().storage
+    if len(csv_bytes) > allowed_sizes.max_attachment_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV too large (max {allowed_sizes.max_attachment_bytes} bytes)",
+        )
+
+    tmp_path: str | None = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=".csv")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(csv_bytes)
+        except Exception:
+            os.unlink(tmp_path)
+            tmp_path = None
+            raise
+
+        logger.info(
+            "biological_age_calculator: user=%s age=%.1f gender=%s size=%d bytes",
+            principal.user_id,
+            chronological_age,
+            gender,
+            len(csv_bytes),
+        )
+
+        try:
+            result = calculate_biological_age(
+                file_path=tmp_path,
+                chronological_age=chronological_age,
+                gender=gender,
+                return_features=return_features,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("biological age calculation failed for user %s", principal.user_id)
+            raise HTTPException(
+                status_code=500,
+                detail="biological age calculation failed due to an internal error",
+            ) from exc
+
+        sanitised: dict[str, Any] = {
+            "action": "biological_age_calculator",
+            "predicted_biological_age": result.get("predicted_biological_age"),
+            "chronological_age": result.get("chronological_age"),
+            "gender": result.get("gender"),
+            "biological_age_advance": result.get("biological_age_advance"),
+            "cosinor_features": result.get("cosinor_features"),
+            "data_summary": result.get("data_summary"),
+        }
+        if return_features:
+            sanitised["features"] = result.get("features")
+        return sanitised
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                logger.debug("could not remove tmp csv %s", tmp_path)
+
+
+# --------------------------------------------------------------------------
 # admin
 # --------------------------------------------------------------------------
 
