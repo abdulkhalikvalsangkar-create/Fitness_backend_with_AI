@@ -87,6 +87,88 @@ def _parse_date(value: Any, field: str) -> date:
         raise HTTPException(status_code=400, detail=f"{field}: expected ISO date") from exc
 
 
+def _parse_bool(value: Any) -> bool:
+    """Parse a boolean from JSON bool, string ('true'/'false'), or int (0/1).
+
+    Multipart form fields always arrive as strings, so `bool('false')` would
+    incorrectly give `True` in plain Python.  This helper does the right thing.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
+
+
+def _to_json_safe(value: Any, _depth: int = 0) -> Any:
+    """Recursively coerce numpy/pandas scalars and containers into plain Python.
+
+    The biological-age calculator returns a nested dict whose leaves are
+    ``numpy.float64``, ``numpy.ndarray`` or ``pandas.Timestamp`` — none of
+    which the default ``json.dumps`` encoder understands.  Running this
+    function on the result before handing it to ``JSONResponse`` turns every
+    leaf into a type the stdlib encoder knows about.
+    """
+    if _depth > 12:
+        return None
+
+    if value is None:
+        return None
+
+    if isinstance(value, bool):
+        return value
+
+    # --- numpy scalars -------------------------------------------------------
+    try:
+        import numpy as _np
+
+        if isinstance(value, _np.floating):
+            return float(value)
+        if isinstance(value, _np.integer):
+            return int(value)
+        if isinstance(value, _np.bool_):
+            return bool(value)
+        if isinstance(value, _np.ndarray):
+            return [_to_json_safe(v, _depth + 1) for v in value.tolist()]
+    except Exception:
+        pass
+
+    # --- pandas / datetime-like ---------------------------------------------
+    try:
+        import pandas as _pd
+
+        if isinstance(value, (_pd.Timestamp, _pd.NaTType)):
+            if _pd.isna(value):
+                return None
+            return value.isoformat()
+    except Exception:
+        pass
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+
+    # --- containers ---------------------------------------------------------
+    if isinstance(value, dict):
+        return {str(k): _to_json_safe(v, _depth + 1) for k, v in value.items()}
+
+    if isinstance(value, (list, tuple, set)):
+        return [_to_json_safe(v, _depth + 1) for v in value]
+
+    # --- native safe types --------------------------------------------------
+    if isinstance(value, (int, float, str)):
+        return value
+
+    # --- anything else: drop callables, stringify the rest -----------------
+    if callable(value):
+        return None
+    try:
+        return str(value)
+    except Exception:
+        return None
+
+
 # --------------------------------------------------------------------------
 # authentication actions — dispatched by the same POST / envelope
 # --------------------------------------------------------------------------
@@ -866,7 +948,7 @@ def handle_biological_age_calculator(
                 detail="gender: required, use 'male'/'M' or 'female'/'F'",
             )
 
-        return_features = bool(body.get("return_features", False))
+        return_features = _parse_bool(body.get("return_features", False))
         logger.info(
             "BIOAGE[%s] stage=%s age=%.1f gender=%s return_features=%s",
             principal.user_id, stage, chronological_age, gender, return_features,
@@ -1007,7 +1089,15 @@ def handle_biological_age_calculator(
         }
         if return_features:
             sanitised["features"] = result.get("features")
-        return sanitised
+        stage = "serialize"
+        try:
+            safe: dict[str, Any] = _to_json_safe(sanitised)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"response serialization failed ({type(exc).__name__}: {exc})",
+            ) from exc
+        return safe
 
     except HTTPException:
         raise
