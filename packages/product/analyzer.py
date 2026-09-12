@@ -142,6 +142,7 @@ class ProductAnalyzer:
         assessment = matcher.assess(analysis.ingredients, analysis.hazards)
         analysis.personal_flags = assessment.flags
         analysis.verdict = assessment.verdict
+        analysis.verdict_reason = assessment.verdict_reason
         trace.rules_ms = round((time.perf_counter() - started) * 1000, 2)
 
         # -- unknowns become jobs, not a blocked turn (arch.md 8.4) --------

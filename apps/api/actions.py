@@ -709,6 +709,36 @@ def handle_scan(body: dict, principal: Principal, session: Session) -> dict[str,
     )
     result = _complete_scan_jobs(result, principal, session)
     result["action"] = "scan"
+
+    # Convenience fields — lifted out of payload.blocks so clients don't have
+    # to walk the block list just to show "recommended / not recommended + why".
+    try:
+        blocks = (result.get("payload") or {}).get("blocks") or []
+    except Exception:
+        blocks = []
+    verdict_data: Optional[dict] = None
+    for block in blocks:
+        if isinstance(block, dict) and block.get("block_id") == "verdict_1":
+            verdict_data = block.get("data") or {}
+            break
+    if verdict_data:
+        result["verdict"] = verdict_data.get("verdict")
+        result["reason"] = verdict_data.get("reason")
+        result["flag_count"] = verdict_data.get("flag_count")
+        result["ingredient_count"] = verdict_data.get("ingredient_count")
+        result["unresolved_count"] = verdict_data.get("unresolved_count")
+    else:
+        # Product-unidentified path: the single block is type product_unidentified
+        # with `data.reason` (identification failure reason) — keep symmetry.
+        for block in blocks:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "product_unidentified"
+                and isinstance(block.get("data"), dict)
+            ):
+                result["verdict"] = "unidentified"
+                result["reason"] = str(block["data"].get("reason") or "unidentified")
+                break
     return result
 
 

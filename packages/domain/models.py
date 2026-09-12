@@ -341,6 +341,7 @@ class ProductAnalysis(Base):
     hazards: list[HazardFinding] = Field(default_factory=list)
     personal_flags: list[PersonalFlag] = Field(default_factory=list)
     verdict: Verdict = Verdict.INSUFFICIENT_DATA
+    verdict_reason: Optional[str] = None
     pending_chemical_ids: list[str] = Field(default_factory=list)
     pending_job_ids: list[str] = Field(default_factory=list)
     kb_version: str = "v1"

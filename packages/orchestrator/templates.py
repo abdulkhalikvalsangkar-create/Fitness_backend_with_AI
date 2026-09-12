@@ -335,6 +335,8 @@ def product_blocks(analysis: "ProductAnalysis") -> list[AnswerBlock]:
             text=_VERDICT_LEAD.get(analysis.verdict, ""),
             data={
                 "verdict": str(analysis.verdict.value),
+                "reason": analysis.verdict_reason
+                or "analysis complete",
                 "flag_count": len(analysis.personal_flags),
                 "ingredient_count": len(analysis.ingredients),
                 "unresolved_count": analysis.unresolved_count,
