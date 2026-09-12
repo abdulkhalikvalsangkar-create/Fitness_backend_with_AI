@@ -877,11 +877,22 @@ def handle_biological_age_calculator(
 
             try:
                 blob = BlobStore(session).get(str(first["attachment_id"]), principal.user_id)
-                csv_bytes = blob.data
             except Exception as exc:
                 raise HTTPException(
                     status_code=404,
                     detail="attachment not found or not accessible",
+                ) from exc
+            if blob is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="attachment not found or not accessible",
+                )
+            try:
+                csv_bytes = blob.read()
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="attachment file could not be read",
                 ) from exc
 
     if csv_bytes is None or len(csv_bytes) == 0:
@@ -890,11 +901,11 @@ def handle_biological_age_calculator(
             detail="attachments[0]: no CSV bytes could be resolved",
         )
 
-    allowed_sizes = get_settings().storage
-    if len(csv_bytes) > allowed_sizes.max_attachment_bytes:
+    storage = get_settings().storage
+    if len(csv_bytes) > storage.max_upload_bytes:
         raise HTTPException(
             status_code=400,
-            detail=f"CSV too large (max {allowed_sizes.max_attachment_bytes} bytes)",
+            detail=f"CSV too large (max {storage.max_upload_bytes} bytes)",
         )
 
     tmp_path: str | None = None
@@ -904,7 +915,14 @@ def handle_biological_age_calculator(
             with os.fdopen(fd, "wb") as f:
                 f.write(csv_bytes)
         except Exception:
-            os.unlink(tmp_path)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
             tmp_path = None
             raise
 
