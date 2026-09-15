@@ -315,7 +315,7 @@ def research_chemical(ctx: JobContext) -> dict[str, Any]:
         return {"token": token, "status": "not_found", "reason": outcome.error}
 
     review_mode = (
-        AdminSettingRepository(ctx.session).get("review_status_control") or "manual"
+        AdminSettingRepository(ctx.session).get("review_status_control_of_product") or "manual"
     ).strip().lower()
     published_automatically = False
     if review_mode == "automatic":
@@ -326,7 +326,7 @@ def research_chemical(ctx: JobContext) -> dict[str, Any]:
         )
     elif review_mode != "manual":
         logger.warning(
-            "unknown review_status_control=%r; keeping chemical %s as draft",
+            "unknown review_status_control_of_product=%r; keeping chemical %s as draft",
             review_mode,
             outcome.chemical_id,
         )
@@ -429,12 +429,25 @@ def deep_research(ctx: JobContext) -> dict[str, Any]:
 
 @handler(JobType.RESTAURANT_INVESTIGATION)
 def investigate_restaurant(ctx: JobContext) -> dict[str, Any]:
-    """arch.md 11.3: async from day one, with progressive results."""
+    """arch.md 11.3: async from day one, with progressive results.
+
+    review_status_control_of_restaurant mirrors review_status_control_of_product
+    (research_chemical, above) so both scan types are administered the same
+    way. It is read and reported here but does not gate anything yet: unlike
+    chemicals, restaurant findings are not written to a draft/published KB —
+    the regulatory/recalls/news/complaints stages are still stubs with nothing
+    to hold back for review.
+    """
     from packages.restaurant.analyzer import RestaurantAnalyzer
 
     query = ctx.payload.get("query") or ctx.payload.get("place_id")
     if not query:
         raise ValueError("restaurant_investigation requires a query or place_id")
+
+    review_mode = (
+        AdminSettingRepository(ctx.session).get("review_status_control_of_restaurant")
+        or "manual"
+    ).strip().lower()
 
     report = RestaurantAnalyzer().analyze(str(query), place_id=ctx.payload.get("place_id"))
 
@@ -446,6 +459,7 @@ def investigate_restaurant(ctx: JobContext) -> dict[str, Any]:
         "no_adverse_findings": report.no_adverse_findings,
         "stages_completed": report.stages_completed,
         "stages_unavailable": report.stages_unavailable,
+        "review_status_control": review_mode,
     }
 
 
