@@ -213,7 +213,7 @@ A cascade, cheapest first. Each stage can decide or defer.
 
 | Stage | Cost | Decides |
 |---|---|---|
-| S0 rules | ~0 | attachments present → `PRODUCT`; place entity + review intent → `RESTAURANT`; greeting/thanks → `SMALLTALK`; safety trigger → `UNSAFE` |
+| S0 rules | ~0 | explicit scan_type=product/restaurant → `PRODUCT`/`RESTAURANT`; place entity + review intent → `RESTAURANT`; greeting/thanks → `SMALLTALK`; safety trigger → `UNSAFE` |
 | S1 exact FAQ | ~0 | hash hit → `FAQ` |
 | S2 embedding | ~5 ms | reranked score ≥ τ_faq → `FAQ`; ≤ τ_low → not FAQ |
 | S3 semantic cache | ~5 ms | ≥ τ_cache and context fingerprint valid → `CACHED` |

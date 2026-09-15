@@ -220,6 +220,36 @@ class BlobStore:
             path=path,
         )
 
+    def set_extracted_text(self, blob_id: str, extracted_text: str) -> None:
+        """Persist OCR/LLM-cleaned text against this specific attachment.
+
+        Keyed on blob_id rather than a per-day snapshot, so a second upload on
+        the same day never overwrites an earlier one's text.
+        """
+        text_value = (extracted_text or "").strip()
+        if not text_value:
+            return
+        self.session.execute(
+            text("UPDATE blob_object SET extracted_text = :info WHERE blob_id = :bid"),
+            {"info": text_value[: 16 * 1024 * 1024], "bid": blob_id},
+        )
+
+    def get_extracted_text(self, blob_id: str, user_id: Optional[str] = None) -> Optional[str]:
+        clause = "AND (user_id = :uid OR user_id IS NULL)" if user_id else ""
+        params: dict[str, Any] = {"bid": blob_id}
+        if user_id:
+            params["uid"] = user_id
+
+        row = self.session.execute(
+            text(
+                f"SELECT extracted_text FROM blob_object WHERE blob_id = :bid {clause}"
+            ),
+            params,
+        ).mappings().first()
+        if not row:
+            return None
+        return row["extracted_text"] or None
+
     def purge_expired(self, limit: int = 500) -> int:
         rows = self.session.execute(
             text(

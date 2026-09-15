@@ -194,16 +194,17 @@ class Router:
                 rationale="explicit scan_type=restaurant",
             )
 
-        if scan_type in {"product", "restaurant"} or has_attachments:
+        # Attachments alone no longer force the product pipeline — only an
+        # explicit scan_type does (set by the `scan` action). A `chat` call
+        # carrying an attachment_id is routed on its text like anything else;
+        # `handle_chat` resolves a document attachment to its OCR'd text
+        # before routing ever sees it.
+        if scan_type in {"product", "restaurant"}:
             return RouteDecision(
                 label=RouteLabel.PRODUCT,
                 confidence=0.99,
                 stage=RouteStage.S0_RULES,
-                rationale=(
-                    "explicit scan_type=product"
-                    if scan_type == "product"
-                    else "attachments present"
-                ),
+                rationale="explicit scan_type=product",
                 category=FaqCategory.PRODUCT,
             )
 

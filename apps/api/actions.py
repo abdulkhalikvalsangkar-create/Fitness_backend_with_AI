@@ -227,51 +227,6 @@ def handle_auth_logout_all(body: dict, principal: Principal, session: Session) -
 # --------------------------------------------------------------------------
 
 
-def _is_document_question(message: str) -> bool:
-    if not isinstance(message, str):
-        return False
-
-    lowered = message.lower()
-    doc_terms = (
-        "report",
-        "document",
-        "lab report",
-        "medical report",
-        "test report",
-        "blood report",
-        "medical document",
-        "uploaded report",
-        "attached report",
-        "uploaded document",
-        "attached document",
-        "uploaded file",
-        "attached file",
-        "lab result",
-        "test result",
-        "scan result",
-        "results",
-        "prescription",
-    )
-    product_terms = (
-        "product",
-        "ingredient",
-        "barcode",
-        "nutrition facts",
-        "label",
-        "pack",
-        "ingredients",
-        "safety",
-        "allergy",
-        "is this safe",
-        "is this product",
-    )
-
-    has_doc_term = any(term in lowered for term in doc_terms)
-    has_product_term = any(term in lowered for term in product_terms)
-    has_context = any(term in lowered for term in ("this", "my", "uploaded", "attached"))
-    return has_doc_term and has_context and not has_product_term
-
-
 @action("chat")
 def handle_chat(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
     # Accept the legacy shape too: the old client sent {messages:[...], context:{...}}.
@@ -300,22 +255,32 @@ def handle_chat(body: dict, principal: Principal, session: Session) -> dict[str,
         )
 
     raw_attachments = _materialise_attachments(raw_attachments, principal, session)
+    scan_type = body.get("scan_type")
 
-    if raw_attachments and _is_document_question(message):
-        repo = HealthRepository(session, principal.user_id)
+    # An attachment referenced here — including one from an earlier `upload`
+    # call in the same session — is read as text context if OCR already ran
+    # on it, rather than handed to the scan/product pipeline: that pipeline
+    # only runs for an explicit scan_type (set by the `scan` action). An
+    # attachment with no extracted text (nothing OCR could read, or OCR still
+    # pending) is left in place, unused by the non-product routes.
+    if raw_attachments and not scan_type:
+        from packages.storage.blobs import BlobStore as _BlobStore
+
+        blob_store = _BlobStore(session)
+        remaining: list[Any] = []
+        doc_texts: list[str] = []
         for item in raw_attachments:
             attachment_id = (item or {}).get("attachment_id") if isinstance(item, dict) else None
-            if not attachment_id:
-                continue
-            extracted = repo.extracted_info_for_attachment(attachment_id)
+            extracted = blob_store.get_extracted_text(attachment_id, principal.user_id) if attachment_id else None
             if extracted:
-                message = (
-                    "User uploaded document text:\n"
-                    f"{extracted}\n\n"
-                    f"Question: {message}"
-                )
-                raw_attachments = []
-                break
+                doc_texts.append(extracted)
+            else:
+                remaining.append(item)
+
+        if doc_texts:
+            joined = "\n\n---\n\n".join(doc_texts)
+            message = f"User uploaded document text:\n{joined}\n\nQuestion: {message}"
+        raw_attachments = remaining
 
     attachments: list[Attachment] = []
     for item in raw_attachments:
@@ -334,7 +299,7 @@ def handle_chat(body: dict, principal: Principal, session: Session) -> dict[str,
         locale=body.get("locale") or "en",
         jurisdiction=body.get("jurisdiction") or "IN",
         client_version=body.get("client_version"),
-        scan_type=body.get("scan_type"),
+        scan_type=scan_type,
         client_hints=body.get("client_hints") or {},
     )
 
@@ -605,6 +570,8 @@ def handle_upload(body: dict, principal: Principal, session: Session) -> dict[st
 
     for index, item in enumerate(raw_items):
         declared = item.get("mime_type") if isinstance(item, dict) else None
+        extracted_text: Optional[str] = None
+        document_response: Optional[str] = None
 
         try:
             if isinstance(item, dict) and isinstance(item.get("bytes"), (bytes, bytearray)):
@@ -625,10 +592,22 @@ def handle_upload(body: dict, principal: Principal, session: Session) -> dict[st
 
                 result = OcrService(session).read(raw)
                 if result and result.ok and result.text.strip():
-                    HealthRepository(session, principal.user_id).upsert_extracted_info(
-                        blob.blob_id,
-                        result.text,
-                    )
+                    extracted_text = result.text
+
+                    try:
+                        from packages.chains.document_summary import DocumentSummaryChain
+
+                        summary = DocumentSummaryChain().summarise(result.text)
+                        if summary is not None:
+                            if summary.cleaned_text.strip():
+                                extracted_text = summary.cleaned_text
+                            document_response = summary.response or None
+                    except Exception:
+                        logger.exception(
+                            "document summary failed for uploaded blob %s", blob.blob_id
+                        )
+
+                    store.set_extracted_text(blob.blob_id, extracted_text)
             except Exception:
                 logger.exception("ocr extraction failed for uploaded blob %s", blob.blob_id)
         except ValueError as exc:
@@ -643,6 +622,8 @@ def handle_upload(body: dict, principal: Principal, session: Session) -> dict[st
                 "size_bytes": blob.size_bytes,
                 "sha256": blob.sha256,
                 "deduplicated": blob.deduplicated,
+                "extracted_text": extracted_text,
+                "response": document_response,
             }
         )
 
@@ -652,7 +633,11 @@ def handle_upload(body: dict, principal: Principal, session: Session) -> dict[st
             detail=f"no attachment could be stored: {errors[0]['error'] if errors else 'unknown'}",
         )
 
-    return {"action": "upload", "attachments": stored, "errors": errors}
+    # Convenience for the common single-attachment case: the app can show this
+    # directly without picking through per-attachment entries.
+    top_response = next((s["response"] for s in stored if s.get("response")), None)
+
+    return {"action": "upload", "attachments": stored, "errors": errors, "response": top_response}
 
 
 def _materialise_attachments(
