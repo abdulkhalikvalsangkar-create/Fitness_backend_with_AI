@@ -87,6 +87,29 @@ def _parse_date(value: Any, field: str) -> date:
         raise HTTPException(status_code=400, detail=f"{field}: expected ISO date") from exc
 
 
+def _parse_datetime(value: Any, field: str) -> datetime:
+    """Parse a full timestamp for a DATETIME column.
+
+    `activity_session.started_at` is DATETIME(3) NOT NULL. Passed through
+    unparsed, a client's ISO-8601 string (`...T...Z`) hits MySQL's implicit
+    string->DATETIME conversion, which does not accept the 'T' separator or a
+    'Z' suffix and fails with an opaque SQL error the caller sees only as a
+    500. Parsing here turns a bad/missing timestamp into a clear 400 instead,
+    and strips tzinfo so the naive value stored is the correct UTC wall time
+    rather than pymysql silently dropping the offset.
+    """
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    text_value = str(value)
+    if text_value.endswith("Z"):
+        text_value = text_value[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text_value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"{field}: expected ISO datetime") from exc
+    return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+
+
 def _parse_bool(value: Any) -> bool:
     """Parse a boolean from JSON bool, string ('true'/'false'), or int (0/1).
 
@@ -478,7 +501,7 @@ def handle_sync(body: dict, principal: Principal, session: Session) -> dict[str,
             {
                 "uid": user_id,
                 "t": str(act.get("activity_type") or "unknown")[:64],
-                "start": act.get("started_at"),
+                "start": _parse_datetime(act.get("started_at"), "activities[].started_at"),
                 "dur": act.get("duration_min"),
                 "dist": act.get("distance_m"),
                 "cal": act.get("calories"),
