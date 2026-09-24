@@ -69,6 +69,13 @@ Read this section first — it's the reason this file exists.
    admin-only setting not exposed to the app, may stay that way indefinitely.
    `ingredient_table` rows now need to be read for `review_status` /
    `review_label`, not just `hazard_level`. See §5.
+9. **`biological_age_calculator` was rebuilt this session — response shape
+   changed.** No more ENMO-CSV requirement; it now also accepts a `features`
+   dict with no file at all. `gender` is no longer required. `cosinor_features`
+   and `data_summary` are gone from the response; new fields
+   (`prediction_method`, `model_type`, `features_used`, `data_quality_percent`,
+   `unavailable`, `explanations`, `can_predict`) replace them. See §4.5,
+   including the provenance caveat on the two ML tiers.
 
 ---
 
@@ -593,47 +600,102 @@ something triggered from an inferred suggestion.
 
 ---
 
-### 4.5 `biological_age_calculator` — ✅ biological age from ENMO CSV
+### 4.5 `biological_age_calculator` — ⚠️ biological age — rebuilt this session, read the caveat
 
-**Multipart recommended**, one CSV file with an ENMO wearable timeseries.
-JSON with a pre-stored `attachment_id` also works.
+**Rebuilt since this doc was first written.** No more ENMO-timeseries CSV
+requirement — it now runs off ordinary daily wearable summaries
+(activity/steps, sleep, resting HR, HRV), and can be called with **no file
+at all** if the app already has those numbers. Two ways in:
+
+**A — `features` dict, no file, JSON:**
+
+```jsonc
+{
+  "action": "biological_age_calculator",
+  "chronological_age": 45,
+  "gender": "male",
+  "features": { "activity_mean": 8000, "sleep_hours": 7.5, "resting_heart_rate": 60, "hrv": 55 }
+}
+```
+
+**B — a file** (multipart, or JSON with a stored `attachment_id`): a CSV or
+JSON of daily metrics — columns are auto-detected by name across common
+vendor conventions (Apple/Garmin/WHOOP/Fitbit — `StepCount`, `totalSteps`,
+`restingHeartRate`, etc. all map to the same canonical field). Raw tri-axial
+accelerometer columns (`x_g`/`y_g`/`z_g`) are reduced to ENMO automatically
+if given instead.
 
 ```js
 const fd = new FormData();
 fd.append("action", "biological_age_calculator");
 fd.append("chronological_age", "45");
-fd.append("gender", "male");
-fd.append("return_features", "false");
-fd.append("file", csvBlob, "enmo_sample.csv");
+fd.append("gender", "male");           // accepted, not required — see below
+fd.append("file", csvBlob, "daily_metrics.csv");
 ```
 
 | field | required | value |
 |---|---|---|
-| `chronological_age` | ✅ | number, 0–120 |
-| `gender` | ✅ | `male`/`M`/`female`/`F` |
-| `return_features` | no | boolean, default `false` — set `true` to also get raw cosinor/nonparam/PA/sleep features |
-| `file` (or a stored `attachment_id`) | ✅ | one CSV, timestamp + ENMO (mg) columns, common column names auto-detected |
+| `chronological_age` | ✅ | number, 1–120 |
+| `gender` | no | echoed back in the response; not used by any model in the cascade today |
+| `return_features` | no | boolean, default `false` — file path only |
+| `features` | one of `features`/`attachments` required | object of biometric values — see the parameter table below |
+| `attachments` (or a stored `attachment_id`) | one of `features`/`attachments` required | one CSV/JSON file of daily metrics |
 
-Max **8 MB**, **1 file** (extras ignored, first used).
+Recognised `features` keys include `activity_mean`/`steps` (steps/day, 0–80000),
+`sleep_hours`/`sleep_mean` (hours, 0–24), `resting_heart_rate`/`resting_hr`
+(bpm, 25–130), `hrv` (ms, 1–300), `recovery_score` (0–100), `vo2_max`
+(10–90), `weight_kg`, `height_cm`, `systolic_bp`/`diastolic_bp`, and several
+sleep-stage/HR-zone breakdowns — an unrecognised key is ignored with a
+warning rather than rejected; an out-of-range value on a recognised key is a
+400.
+
+Max **8 MB**, **1 file** (extras ignored, first used) for the file path.
 
 ```jsonc
 {
   "action": "biological_age_calculator",
-  "predicted_biological_age": 47.83,
-  "chronological_age": 45.0,
+  "can_predict": true,
+  "predicted_biological_age": 28.9,
+  "chronological_age": 30.0,
   "gender": "male",
-  "biological_age_advance": 2.83,
-  "cosinor_features": { "mesor": 35.6214, "amplitude": 28.4571, "acrophase": 3.1416 },
-  "data_summary": { "days_covered": 7.25 }
-  // + "features": {...} only when return_features=true
+  "biological_age_advance": -1.1,
+  "prediction_method": "ML Model - Model A (Full Feature Set)",
+  "model_type": "Scikit-Learn Random Forest ML Model",
+  "model_description": "...",
+  "data_period": "Manual input",
+  "features_used": { "activity_mean": 8000.0, "sleep_mean": 7.5, "resting_heart_rate": 60.0, "hrv": 55.0 },
+  "unavailable": [{ "name": "Vo2 Max", "reason": "Parameter not present in uploaded dataset." }],
+  "additional_input_detected": [],
+  "data_quality_percent": 100.0,
+  "adjustments": [-1.1],
+  "explanations": ["Model A (Full Multi-Modal) inference: 28.9 yrs (-1.1 yrs from chronological age 30.0)...."]
+  // + "features": {...} only when return_features=true (file path)
 }
 ```
 
+`prediction_method`/`model_type` tell you which tier answered: **Model A**
+(activity+sleep+resting HR+HRV, full ML), **Model B** (same minus HRV, ML),
+or the **Validated Fallback** (a clinical rule engine, not ML — used when
+only activity or sleep is available). `cosinor_features` and `data_summary`
+from the old CosinorAge response are gone — nothing produces them any more.
+
+> **Read before presenting this as authoritative:** the two ML models
+> (A/B) were trained on a public Kaggle dataset with **no held-out test
+> split**, against a **biological-age label computed by a formula**, not an
+> independently measured one — confirmed directly with whoever built them.
+> The near-perfect fit numbers baked into the model files reflect the model
+> reproducing that formula, not validated real-world accuracy. Treat a
+> result from Model A/B as an informed heuristic, not a clinical measurement,
+> until it's retrained on a documented dataset with a proper held-out
+> evaluation. This doesn't affect how you integrate it — the request/response
+> shape here is stable — but it should shape how confidently the number is
+> presented in the UI (e.g. not as a clinical result).
+
 | status | meaning |
 |---|---|
-| 400 | input validation (age out of range, bad gender, missing/oversized/unreadable file) |
-| 422 | CSV loaded but CosinorAge couldn't produce a prediction — insufficient coverage; retry with more/better data |
-| 503 | biological-age module unavailable on this deploy (missing `cosinorage` dependency) |
+| 400 | input validation (age out of range, neither `features` nor `attachments` given, an out-of-range feature value, missing/oversized/unreadable file) |
+| 422 | ran, but couldn't produce a prediction — too little recognised data even for the fallback tier (needs at least activity or sleep) |
+| 503 | biological-age module unavailable on this deploy |
 | 500 | internal processing error, with a specific message and stage in `error` — not the generic `"internal error"` other actions return |
 
 ---
@@ -892,7 +954,7 @@ scan (scan_type=product)     analyse product images                multipart    
 scan (scan_type=restaurant)  analyse a restaurant/place             multipart      ⛔ stub
 upload                      store a file; get OCR text + reply    multipart      ✅
 sync                        push health data                      json           ✅ (see §4.4 gaps)
-biological_age_calculator    biological age from ENMO CSV          multipart/json ✅
+biological_age_calculator    biological age, features dict or file  multipart/json ⚠️ see §4.5
 consent                     grant/revoke/list scopes               json           ✅
 context                     what the assistant currently knows     json           ✅
 history                     recent turns in a session              json           ✅

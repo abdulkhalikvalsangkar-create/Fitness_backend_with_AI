@@ -939,23 +939,24 @@ def handle_context(body: dict, principal: Principal, session: Session) -> dict[s
 def handle_biological_age_calculator(
     body: dict, principal: Principal, session: Session
 ) -> dict[str, Any]:
-    """Calculate biological age from wearable ENMO CSV timeseries.
+    """Calculate biological age from daily wearable summaries.
 
-    The app POSTs this through the same unified endpoint with
-    action=biological_age_calculator and either a stored attachment_id or a
-    raw multipart file as first attachment.
+    Two ways in: a CSV/JSON file of daily metrics (attachment bytes, a
+    stored attachment_id, or raw x/y/z accelerometer axes which get reduced
+    to ENMO), or a `features` dict with no file at all — the app can use
+    whichever it already has on hand for a given user.
     """
-    import os
-    import tempfile
     import traceback
 
     stage = "init"
-    tmp_path: str | None = None
     try:
         # --- 1. import module ------------------------------------------------
         stage = "import"
         try:
-            from packages.biological_age import calculate_biological_age
+            from packages.biological_age import (
+                calculate_biological_age,
+                calculate_biological_age_from_features,
+            )
         except Exception as exc:
             logger.exception("BIOAGE[%s] import failed", principal.user_id)
             raise HTTPException(
@@ -970,21 +971,18 @@ def handle_biological_age_calculator(
         except (TypeError, ValueError) as exc:
             raise HTTPException(
                 status_code=400,
-                detail="chronological_age: required, must be a number between 0 and 120",
+                detail="chronological_age: required, must be a number between 1 and 120",
             ) from exc
         if not (0 < chronological_age <= 120):
             raise HTTPException(
                 status_code=400,
-                detail="chronological_age: must be between 0 and 120 years",
+                detail="chronological_age: must be between 1 and 120 years",
             )
 
-        stage = "validate_gender"
+        # gender is accepted and echoed back, but no model in the cascade
+        # consumes it — it is not required.
         gender = body.get("gender")
-        if not isinstance(gender, str) or not gender.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="gender: required, use 'male'/'M' or 'female'/'F'",
-            )
+        gender = gender.strip() if isinstance(gender, str) and gender.strip() else None
 
         return_features = _parse_bool(body.get("return_features", False))
         logger.info(
@@ -992,141 +990,121 @@ def handle_biological_age_calculator(
             principal.user_id, stage, chronological_age, gender, return_features,
         )
 
-        # --- 3. resolve attachment bytes ------------------------------------
-        stage = "resolve_attachments"
+        # --- 3. resolve input: a file, or a features dict --------------------
+        stage = "resolve_input"
         raw_attachments = body.get("attachments") or []
-        if not isinstance(raw_attachments, list) or not raw_attachments:
-            raise HTTPException(
-                status_code=400,
-                detail="attachments: required, provide exactly one CSV file",
+        features = body.get("features")
+
+        if isinstance(raw_attachments, list) and raw_attachments:
+            first = raw_attachments[0]
+            file_bytes: bytes | None = None
+            filename = "data.csv"
+            attachment_kind = "unknown"
+
+            if isinstance(first, dict):
+                if isinstance(first.get("filename"), str) and first["filename"].strip():
+                    filename = first["filename"]
+                elif str(first.get("mime_type") or "").endswith("json"):
+                    filename = "data.json"
+
+                if isinstance(first.get("bytes"), (bytes, bytearray)):
+                    file_bytes = bytes(first["bytes"])
+                    attachment_kind = "multipart_bytes"
+                elif first.get("attachment_id"):
+                    from packages.storage.blobs import BlobStore
+
+                    attachment_kind = f"stored_id:{first.get('attachment_id')}"
+                    try:
+                        blob = BlobStore(session).get(str(first["attachment_id"]), principal.user_id)
+                    except Exception as exc:
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"attachment not found or not accessible ({type(exc).__name__}: {exc})",
+                        ) from exc
+                    if blob is None:
+                        raise HTTPException(
+                            status_code=404,
+                            detail="attachment not found or not accessible",
+                        )
+                    try:
+                        file_bytes = blob.read()
+                    except Exception as exc:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"attachment file could not be read ({type(exc).__name__}: {exc})",
+                        ) from exc
+
+            if file_bytes is None or len(file_bytes) == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"attachments[0]: no file bytes could be resolved (kind={attachment_kind})",
+                )
+
+            storage = get_settings().storage
+            if len(file_bytes) > storage.max_upload_bytes:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"file too large: {len(file_bytes)} > {storage.max_upload_bytes} bytes",
+                )
+            logger.info(
+                "BIOAGE[%s] stage=%s attachment=%s size=%d bytes",
+                principal.user_id, stage, attachment_kind, len(file_bytes),
             )
 
-        first = raw_attachments[0]
-        csv_bytes: bytes | None = None
-        attachment_kind = "unknown"
-
-        if isinstance(first, dict):
-            if isinstance(first.get("bytes"), (bytes, bytearray)):
-                csv_bytes = bytes(first["bytes"])
-                attachment_kind = "multipart_bytes"
-            elif first.get("attachment_id"):
-                from packages.storage.blobs import BlobStore
-
-                attachment_kind = f"stored_id:{first.get('attachment_id')}"
-                try:
-                    blob = BlobStore(session).get(str(first["attachment_id"]), principal.user_id)
-                except Exception as exc:
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"attachment not found or not accessible ({type(exc).__name__}: {exc})",
-                    ) from exc
-                if blob is None:
-                    raise HTTPException(
-                        status_code=404,
-                        detail="attachment not found or not accessible",
-                    )
-                try:
-                    csv_bytes = blob.read()
-                except Exception as exc:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"attachment file could not be read ({type(exc).__name__}: {exc})",
-                    ) from exc
-
-        if csv_bytes is None or len(csv_bytes) == 0:
-            raise HTTPException(
-                status_code=400,
-                detail=f"attachments[0]: no CSV bytes could be resolved (kind={attachment_kind})",
-            )
-
-        storage = get_settings().storage
-        if len(csv_bytes) > storage.max_upload_bytes:
-            raise HTTPException(
-                status_code=400,
-                detail=f"CSV too large: {len(csv_bytes)} > {storage.max_upload_bytes} bytes",
-            )
-        logger.info(
-            "BIOAGE[%s] stage=%s attachment=%s size=%d bytes",
-            principal.user_id, stage, attachment_kind, len(csv_bytes),
-        )
-
-        # --- 4. write temp CSV ----------------------------------------------
-        stage = "write_tempfile"
-        fd, tmp_path = tempfile.mkstemp(suffix=".csv")
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(csv_bytes)
-        except Exception as exc:
+            stage = "calculate"
             try:
-                os.close(fd)
-            except OSError:
-                pass
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            tmp_path = None
-            raise HTTPException(
-                status_code=500,
-                detail=f"failed to write temp CSV ({type(exc).__name__}: {exc})",
-            ) from exc
-        logger.info(
-            "BIOAGE[%s] stage=%s tmp=%s",
-            principal.user_id, stage, tmp_path,
-        )
+                result = calculate_biological_age(
+                    contents=file_bytes,
+                    filename=filename,
+                    chronological_age=chronological_age,
+                    gender=gender,
+                    return_features=return_features,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        # --- 5. call calculator ---------------------------------------------
-        stage = "calculate"
-        try:
-            result = calculate_biological_age(
-                file_path=tmp_path,
-                chronological_age=chronological_age,
-                gender=gender,
-                return_features=return_features,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except HTTPException:
-            raise
-        except Exception as exc:
-            tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
-            tb_str = "".join(tb_lines[-6:])
-            logger.exception(
-                "BIOAGE[%s] stage=%s calculator raised %s: %s\n%s",
-                principal.user_id, stage, type(exc).__name__, exc, tb_str,
-            )
+        elif isinstance(features, dict) and features:
+            stage = "calculate"
+            try:
+                result = calculate_biological_age_from_features(
+                    chronological_age=chronological_age,
+                    features=features,
+                    gender=gender,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        else:
             raise HTTPException(
-                status_code=500,
+                status_code=400,
                 detail=(
-                    f"calculator error ({type(exc).__name__}): "
-                    f"{str(exc)[:800]}"
+                    "provide either 'attachments' (a CSV/JSON file of daily "
+                    "wearable metrics) or 'features' (an object of biometric "
+                    "values, e.g. {\"activity_mean\": 8000, \"sleep_hours\": 7.5, "
+                    "\"resting_heart_rate\": 60, \"hrv\": 55})"
                 ),
-            ) from exc
+            )
+
+        if not result.get("can_predict", True):
+            explanation = (result.get("explanations") or [
+                "Insufficient validated data to compute biological age."
+            ])[0]
+            raise HTTPException(status_code=422, detail=explanation)
 
         logger.info(
-            "BIOAGE[%s] stage=%s done predicted=%.2f advance=%.2f",
-            principal.user_id, stage,
-            result.get("predicted_biological_age") or -1,
-            result.get("biological_age_advance") or 0,
+            "BIOAGE[%s] stage=calculate done predicted=%s advance=%s method=%s",
+            principal.user_id,
+            result.get("predicted_biological_age"),
+            result.get("biological_age_advance"),
+            result.get("prediction_method"),
         )
 
-        # --- 6. build response ----------------------------------------------
+        # --- 4. build response ------------------------------------------------
         stage = "response"
         sanitised: dict[str, Any] = {
             "action": "biological_age_calculator",
-            "predicted_biological_age": result.get("predicted_biological_age"),
-            "chronological_age": result.get("chronological_age"),
-            "gender": result.get("gender"),
-            "biological_age_advance": result.get("biological_age_advance"),
-            "cosinor_features": result.get("cosinor_features"),
-            "data_summary": result.get("data_summary"),
+            **result,
         }
-        if return_features:
-            sanitised["features"] = result.get("features")
         stage = "serialize"
         try:
             safe: dict[str, Any] = _to_json_safe(sanitised)
@@ -1152,12 +1130,6 @@ def handle_biological_age_calculator(
                 f"[stage={stage}] {type(exc).__name__}: {str(exc)[:900]}"
             ),
         ) from exc
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                logger.debug("BIOAGE could not remove tmp csv %s", tmp_path)
 
 
 # --------------------------------------------------------------------------
