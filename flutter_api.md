@@ -494,6 +494,22 @@ Then reference the handle in a later turn:
 All four top-level sections (`profile`, `metrics`, `nutrition`, `activities`,
 `medical`) are independently optional — send only what changed.
 
+### Dashboard read contract
+
+After syncing Health Connect data, request the values used by the Dashboard,
+Recovery Pattern, Sleep, and Goals screens:
+
+```jsonc
+{ "action": "dashboard" }
+```
+
+The response contains `recovery` (0–100), `strain` (0–21), `sleep` (0–100),
+exactly seven `recovery_history` calendar entries, and the most recent
+`body_fat` reading. Each score includes `source: synced | derived | unavailable`
+so the UI can distinguish a wearable-provided score from a backend estimate.
+The optional ISO `date` field supports historical dashboard reads and defaults
+to the server's current date. See `API.md` for the full response example.
+
 #### `profile` fields — accepted vs. actually usable
 
 | field | type | accepted | read back by the assistant |

@@ -353,6 +353,41 @@ Idempotent — metrics upsert on `(user, metric, date, source)`. Safe to re-send
 
 ---
 
+### `dashboard` — scores, recovery history, and body fat
+
+Returns the app-facing Dashboard/Recovery/Goals values. Health Connect does not
+provide these final scores: synced `recovery`, `strain`, and `sleep` scores are
+preferred when present; otherwise the backend deterministically derives them
+from sleep duration, movement/activity, resting heart rate, and HRV when HRV is
+available. Missing HRV does not block recovery calculation.
+
+```jsonc
+{ "action": "dashboard", "date": "2026-10-12" } // date is optional; defaults to today
+```
+
+```jsonc
+{
+  "action": "dashboard",
+  "date": "2026-10-12",
+  "recovery": { "value": 82.0, "scale_max": 100, "source": "derived",
+                "inputs_used": ["sleep", "rhr_vs_baseline", "previous_day_strain"] },
+  "strain":   { "value": 12.4, "scale_max": 21,  "source": "derived" },
+  "sleep":    { "value": 100.0, "scale_max": 100, "source": "derived" },
+  "recovery_history": [
+    { "date": "2026-10-06", "score": null, "source": "unavailable" },
+    { "date": "2026-10-07", "score": 77.1, "source": "derived" }
+  ],
+  "body_fat": { "value": 18.7, "unit": "%", "measured_on": "2026-10-10",
+                "source": "manual" }
+}
+```
+
+History always contains seven calendar dates, oldest first; missing days carry
+`score: null`. `body_fat` is the latest value on or before the requested date.
+All `source` fields distinguish a synced score from a backend-derived score.
+
+---
+
 ### `biological_age_calculator` — biological age from ENMO CSV
 
 **Multipart recommended.** Accepts one CSV file with ENMO timeseries
@@ -694,6 +729,7 @@ scan             analyse product images           multipart
 upload           store images, get handles        multipart
 biological_age_calculator  biological age from ENMO CSV  multipart or json
 sync             push health data                 json
+dashboard        dashboard scores and history     json
 consent          grant/revoke/list scopes         json
 context          what the assistant knows         json
 history          recent turns                     json

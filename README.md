@@ -39,6 +39,7 @@ Authorization: Bearer <jwt>
 | `upload` | Stores attachments, returns handles. Bytes enter here and nowhere else |
 | `scan` | Upload + analyse in one call — the scanner-screen path |
 | `sync` | Writes profile / metrics / nutrition / activities / medical — **replaces `csv_health_data` in the request body** |
+| `dashboard` | Returns recovery/sleep/strain scores, 7-day recovery history, and latest body fat |
 | `context` | Shows exactly what the assistant can see about you |
 | `consent` | `list` / `grant` / `revoke` per data scope |
 | `memory` | `list` / `remember` / `forget` — user-visible and editable |

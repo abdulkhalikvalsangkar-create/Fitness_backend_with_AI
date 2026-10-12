@@ -23,6 +23,7 @@ from packages.config import get_settings
 from packages.domain.auth import FirebaseExchangeRequest, LogoutRequest, RefreshRequest
 from packages.domain.enums import ConsentScope, JobType
 from packages.domain.models import Attachment
+from packages.health import build_dashboard
 from packages.orchestrator import new_state, run_turn, total_latency_ms
 from packages.storage.db import session_scope
 from packages.storage.repositories.cache import CacheRepository
@@ -554,6 +555,22 @@ def handle_sync(body: dict, principal: Principal, session: Session) -> dict[str,
     )
 
     return {"action": "sync", "written": written, "aggregate_job_id": job_id}
+
+
+@action("dashboard")
+def handle_dashboard(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
+    """Return app-facing scores and the current body-fat measurement."""
+    on = _parse_date(body.get("date"), "date") if body.get("date") else date.today()
+    if on > date.today():
+        raise HTTPException(status_code=400, detail="date cannot be in the future")
+
+    health = HealthRepository(session, principal.user_id)
+    result = build_dashboard(
+        on=on,
+        metric_points=health.dashboard_metric_points(on),
+        activity_days=health.dashboard_activity_days(on),
+    )
+    return {"action": "dashboard", **result}
 
 
 # --------------------------------------------------------------------------

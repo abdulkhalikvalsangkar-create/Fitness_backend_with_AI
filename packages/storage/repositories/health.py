@@ -150,6 +150,39 @@ class HealthRepository:
             for r in rows
         ]
 
+    def dashboard_metric_points(self, through: date, baseline_days: int = 28) -> list[dict[str, Any]]:
+        """Raw score inputs for the dashboard, including baseline provenance."""
+        since = through - timedelta(days=baseline_days + 7)
+        rows = self.session.execute(
+            text(
+                "SELECT metric, value, unit, measured_on, source FROM health_metric "
+                "WHERE user_id = :uid AND measured_on BETWEEN :since AND :through "
+                "AND metric IN ('recovery','strain','sleep','sleep_hours','rhr','hrv','steps','body_fat') "
+                "ORDER BY measured_on, ingested_at"
+            ),
+            {"uid": self.user_id, "since": since, "through": through},
+        ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def dashboard_activity_days(self, through: date) -> dict[date, dict[str, float]]:
+        since = through - timedelta(days=6)
+        rows = self.session.execute(
+            text(
+                "SELECT DATE(started_at) AS activity_day, SUM(duration_min) AS active_minutes, "
+                "SUM(calories) AS calories FROM activity_session "
+                "WHERE user_id = :uid AND DATE(started_at) BETWEEN :since AND :through "
+                "GROUP BY DATE(started_at)"
+            ),
+            {"uid": self.user_id, "since": since, "through": through},
+        ).mappings().all()
+        return {
+            row["activity_day"]: {
+                "active_minutes": float(row["active_minutes"]) if row["active_minutes"] is not None else None,
+                "calories": float(row["calories"]) if row["calories"] is not None else None,
+            }
+            for row in rows
+        }
+
     def metric_summary(self, metric: str, days: int = 7) -> Optional[RollingStat]:
         """Aggregated in SQL — the rows never come back over the wire.
 
