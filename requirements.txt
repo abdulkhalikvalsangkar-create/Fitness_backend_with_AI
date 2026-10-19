@@ -38,10 +38,12 @@ opencv-python-headless>=4.9
 zxing-cpp>=2.2
 Pillow>=10.0
 
-# biological age dependencies — RandomForest cascade over daily wearable
-# summaries (packages/biological_age). Replaced the CosinorAge/ENMO-timeseries
-# implementation, which needed scikit-digital-health/CosinorPy/claid/protobuf/
-# grpcio/statsmodels/seaborn/matplotlib — none of that is required any more.
+# biological age dependencies — a single missing-aware Linear Regression
+# model over daily wearable summaries (packages/biological_age). Same
+# package list serves this and the RandomForest cascade it replaced,
+# which itself replaced a CosinorAge/ENMO-timeseries implementation that
+# needed scikit-digital-health/CosinorPy/claid/protobuf/grpcio/statsmodels/
+# seaborn/matplotlib — none of that is required any more.
 pandas==2.2.3
 scipy==1.14.1
 scikit-learn==1.6.1

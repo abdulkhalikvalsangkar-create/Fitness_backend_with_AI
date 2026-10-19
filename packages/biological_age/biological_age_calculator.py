@@ -1,17 +1,18 @@
 """Entry points for the `biological_age_calculator` action.
 
-Two ways in, both ending at the same cascade
-(`packages.biological_age.age_model.ModelRegistry`):
+Single missing-aware Linear Regression model, replacing the previous
+two-tier RandomForest cascade (Model A / Model B / rule fallback). One
+model, trained with feature-availability masks, handles any combination of
+the 12 recognised inputs being present or missing — accuracy degrades
+gracefully rather than switching between discrete tiers. See README.md for
+the model-provenance caveat; the same caution applies as before.
 
-  * `calculate_biological_age` — a CSV/JSON file of daily wearable summaries
-    (activity/steps, sleep, resting HR, HRV, ...), or raw tri-axial
-    accelerometer (x_g/y_g/z_g) that gets reduced to ENMO first.
-  * `calculate_biological_age_from_features` — a features dict directly, no
-    file at all, for a client that already has the day's numbers on hand.
+Two ways in, same as the previous module:
 
-Replaces the previous CosinorAge-based implementation, which required a
-minute-level ENMO timeseries CSV — a much harder thing for a mobile app to
-produce than the daily summaries most wearable integrations already expose.
+  * `calculate_biological_age` — a CSV/JSON file; one row (or the mean of
+    several) is read for the recognised columns.
+  * `calculate_biological_age_from_features` — a features dict directly,
+    no file at all.
 """
 
 from __future__ import annotations
@@ -19,22 +20,53 @@ from __future__ import annotations
 import io
 import json
 import logging
+import threading
 import warnings
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 
+from packages.biological_age.parameter_validator import (
+    ALIASES,
+    CATEGORICAL_FEATURES,
+    FEATURES,
+    ParameterValidator,
+)
+
 logger = logging.getLogger(__name__)
 
 _DATA_KEYS = ("data", "records", "samples", "measurements", "readings")
+_MODEL_PATH = Path(__file__).resolve().parent / "models" / "missing_aware_biological_age_model.joblib"
+
+# Loading the joblib bundle is the only non-trivial cost on this path; one
+# process-wide cache means it's paid once per worker, not once per request.
+_bundle_cache: Any = None
+_cache_lock = threading.Lock()
+
+
+def _load_bundle() -> Dict[str, Any]:
+    global _bundle_cache
+    if _bundle_cache is not None:
+        return _bundle_cache
+
+    with _cache_lock:
+        if _bundle_cache is None:
+            import joblib
+
+            with warnings.catch_warnings():
+                # Pickled under a newer scikit-learn than the one pinned
+                # here; verified compatible (loads and predicts correctly)
+                # — this just silences the warning noise on the one load
+                # per worker.
+                warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+                _bundle_cache = joblib.load(_MODEL_PATH)
+        return _bundle_cache
 
 
 def _parse_dataframe(contents: bytes, filename: str) -> pd.DataFrame:
-    """CSV or JSON bytes -> DataFrame, deriving ENMO from raw x/y/z if present.
-
-    Ported from the source engine's `server.py::_parse_upload`.
-    """
+    """CSV or JSON bytes -> DataFrame. Unchanged from the previous module."""
     if not contents:
         raise ValueError("Uploaded file is completely empty.")
 
@@ -65,31 +97,141 @@ def _parse_dataframe(contents: bytes, filename: str) -> pd.DataFrame:
     if df.empty or len(df.dropna(how="all")) == 0:
         raise ValueError("Dataset has no data rows.")
 
-    col_lower = {c.lower(): c for c in df.columns}
-    has_xyz = all(k in col_lower for k in ("x_g", "y_g", "z_g"))
-    has_enmo = any("enmo" in c.lower() for c in df.columns)
-    if has_xyz and not has_enmo:
-        x = pd.to_numeric(df[col_lower["x_g"]], errors="coerce")
-        y = pd.to_numeric(df[col_lower["y_g"]], errors="coerce")
-        z = pd.to_numeric(df[col_lower["z_g"]], errors="coerce")
-        df["enmo"] = (np.sqrt(x**2 + y**2 + z**2) - 1.0).clip(lower=0.0)
-        logger.info("derived ENMO from x_g/y_g/z_g (mean=%.5fg)", float(df["enmo"].mean()))
-
     return df
 
 
-def _load_model_registry():
-    # Deferred: importing age_model.py loads two joblib bundles (~27 MB) off
-    # disk. Nothing else in the request path needs that cost paid up front.
-    from packages.biological_age.age_model import ModelRegistry
+def _extract_features_from_dataframe(df: pd.DataFrame) -> Dict[str, Any]:
+    """Map recognised columns (by name, case-insensitive, alias-aware) onto
+    one feature dict — numeric columns averaged across rows, categorical
+    columns take the first non-null value."""
+    col_for_feature: Dict[str, str] = {}
+    for col in df.columns:
+        key = ALIASES.get(str(col).strip().lower(), str(col).strip().lower())
+        if key in FEATURES and key not in col_for_feature:
+            col_for_feature[key] = col
+
+    extracted: Dict[str, Any] = {}
+    for feature, col in col_for_feature.items():
+        if feature in CATEGORICAL_FEATURES:
+            non_null = df[col].dropna()
+            if len(non_null):
+                extracted[feature] = str(non_null.iloc[0])
+        else:
+            numeric = pd.to_numeric(df[col], errors="coerce").dropna()
+            if len(numeric):
+                extracted[feature] = float(numeric.mean())
+
+    return extracted
+
+
+def _predict(
+    chronological_age: float, features: Dict[str, Any], gender: Optional[str]
+) -> Dict[str, Any]:
+    """Validate -> build the availability mask -> transform -> predict.
+
+    `age` is always treated as available: it comes from the already-
+    validated `chronological_age` parameter, not from `features`, so it
+    can't be missing or out of range by the time it gets here. `gender` is
+    taken from the top-level parameter only if the caller didn't already
+    put it in `features`.
+    """
+    merged = dict(features or {})
+    merged.setdefault("age", chronological_age)
+    has_gender = any(str(k).strip().lower() == "gender" for k in merged)
+    if gender and not has_gender:
+        merged["gender"] = gender
+
+    report = ParameterValidator().validate(merged)
+    if not report["valid"]:
+        raise ValueError(next(iter(report["errors"].values())))
+
+    cleaned = dict(report["cleaned_features"])
+    cleaned["age"] = float(chronological_age)
+
+    # Unlike the model's raw behaviour (it will happily impute every
+    # missing value and return something close to the training-set mean
+    # age for a completely empty request), this API refuses to answer with
+    # nothing but chronological age — the old cascade's fallback tier
+    # required at least one real signal (activity or sleep) too. Returning
+    # can_predict: False (rather than raising) matches how the old cascade
+    # signalled "ran, but not enough data" — the action handler maps that
+    # to a 422, not a 400.
+    if not any(k != "age" for k in cleaned):
+        return {
+            "can_predict": False,
+            "biological_age": None,
+            "chronological_age": round(float(chronological_age), 1),
+            "prediction_method": "No Prediction — Insufficient Validated Data",
+            "model_type": "",
+            "model_description": "",
+            "data_period": "Single snapshot",
+            "features_used": {},
+            "unavailable": [{"name": f, "reason": "Not supplied."} for f in FEATURES if f != "age"],
+            "additional_input_detected": [
+                {"column": k, "reason": v} for k, v in report["warnings"].items()
+            ],
+            "data_quality_percent": round(1 / len(FEATURES) * 100.0, 1),
+            "adjustments": [],
+            "explanations": [
+                "Insufficient validated data to compute biological age. "
+                "Provide at least one health/wearable measurement besides age."
+            ],
+        }
+
+    bundle = _load_bundle()
+    preprocessor = bundle["preprocessor"]
+    model = bundle["model"]
+
+    values = {f: cleaned.get(f, np.nan) for f in FEATURES}
+    mask = {f: (1 if f in cleaned else 0) for f in FEATURES}
+
+    values_df = pd.DataFrame([values], columns=FEATURES)
+    mask_df = pd.DataFrame([mask], columns=FEATURES)
 
     with warnings.catch_warnings():
-        # The bundled models were pickled under a newer scikit-learn than the
-        # one pinned here; verified compatible (loads and predicts
-        # correctly) — this just silences the per-tree warning noise on
-        # every request.
         warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
-        return ModelRegistry()
+        encoded = preprocessor.transform(values_df)
+        combined = np.hstack([np.asarray(encoded), mask_df.to_numpy(dtype=float)])
+        raw_pred = float(model.predict(combined)[0])
+
+    bio_age = round(max(1.0, min(120.0, raw_pred)), 1)
+
+    available = [f for f in FEATURES if mask[f] == 1]
+    unavailable = [f for f in FEATURES if mask[f] == 0]
+
+    explanations = [
+        f"Missing-aware linear model inference: {bio_age:.1f} yrs from "
+        f"{len(available)} of {len(FEATURES)} recognised parameters "
+        f"({', '.join(available)})."
+    ]
+    if unavailable:
+        explanations.append(f"Not supplied or excluded: {', '.join(unavailable)}.")
+
+    return {
+        "can_predict": True,
+        "biological_age": bio_age,
+        "chronological_age": round(float(chronological_age), 1),
+        "prediction_method": "Missing-Aware Linear Regression Model",
+        "model_type": "Scikit-Learn Linear Regression (availability-mask features)",
+        "model_description": (
+            "Single Multiple Linear Regression model trained with feature-"
+            "availability masks, so any subset of the 12 recognised "
+            "parameters can be used; accuracy degrades gracefully as fewer "
+            "are supplied rather than switching between discrete tiers."
+        ),
+        "data_period": "Single snapshot",
+        "features_used": cleaned,
+        "unavailable": [
+            {"name": f, "reason": "Not supplied, or supplied but invalid/unverified."}
+            for f in unavailable
+        ],
+        "additional_input_detected": [
+            {"column": k, "reason": v} for k, v in report["warnings"].items()
+        ],
+        "data_quality_percent": round(len(available) / len(FEATURES) * 100.0, 1),
+        "adjustments": [],
+        "explanations": explanations,
+    }
 
 
 def calculate_biological_age(
@@ -99,16 +241,10 @@ def calculate_biological_age(
     gender: Optional[str] = None,
     return_features: bool = False,
 ) -> Dict[str, Any]:
-    """End-to-end: parse an uploaded file, run the cascade, shape the result."""
-    from packages.biological_age.engine import AdaptiveBiologicalAgeEngine
-
+    """End-to-end: parse an uploaded file, run the model, shape the result."""
     df = _parse_dataframe(contents, filename)
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
-        engine = AdaptiveBiologicalAgeEngine()
-        result = engine.calculate(df, chronological_age=chronological_age)
-
+    features = _extract_features_from_dataframe(df)
+    result = _predict(chronological_age, features, gender)
     return _shape_result(result, gender=gender, return_features=return_features)
 
 
@@ -117,50 +253,20 @@ def calculate_biological_age_from_features(
     features: Dict[str, Any],
     gender: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """No file: validate a features dict and run the cascade directly."""
-    from packages.biological_age.parameter_validator import ParameterValidator
-
+    """No file: validate a features dict and run the model directly."""
     if not isinstance(features, dict) or not features:
         raise ValueError("features must be a non-empty object.")
 
-    report = ParameterValidator().validate(features)
-    if not report["valid"]:
-        raise ValueError(next(iter(report["errors"].values())))
-
-    cleaned = report["cleaned_features"]
-    if not cleaned:
-        raise ValueError("No recognised parameters provided.")
-
-    registry = _load_model_registry()
-    prediction = registry.select_and_predict(chronological_age, cleaned)
-
-    result = {
-        "can_predict": prediction.get("can_predict", True),
-        "biological_age": prediction.get("biological_age"),
-        "chronological_age": round(float(chronological_age), 1),
-        "prediction_method": prediction.get("selected_model", prediction.get("model_name")),
-        "model_type": prediction.get("model_type", ""),
-        "model_description": prediction.get("model_description", ""),
-        "data_period": "Manual input",
-        "features_used": cleaned,
-        "unavailable": [],
-        "additional_input_detected": [
-            {"column": k, "reason": "Not used (no validated model mapping)"}
-            for k in report["warnings"].keys()
-        ],
-        "data_quality_percent": 100.0,
-        "adjustments": prediction.get("adjustments", []),
-        "explanations": prediction.get("explanations", []),
-    }
+    result = _predict(chronological_age, features, gender)
     return _shape_result(result, gender=gender, return_features=False)
 
 
 def _shape_result(
     result: Dict[str, Any], *, gender: Optional[str], return_features: bool
 ) -> Dict[str, Any]:
-    """Engine output -> action response. Keeps the field names the app
-    already parses (`predicted_biological_age`, `biological_age_advance`)
-    alongside the engine's own richer fields."""
+    """Model output -> action response. Keeps the exact field names the app
+    already parses (`predicted_biological_age`, `biological_age_advance`,
+    etc.) — unchanged from the previous module's response shape."""
     bio_age = result.get("biological_age")
     chrono_age = result.get("chronological_age")
 

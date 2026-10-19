@@ -69,13 +69,10 @@ Read this section first — it's the reason this file exists.
    admin-only setting not exposed to the app, may stay that way indefinitely.
    `ingredient_table` rows now need to be read for `review_status` /
    `review_label`, not just `hazard_level`. See §5.
-9. **`biological_age_calculator` was rebuilt this session — response shape
-   changed.** No more ENMO-CSV requirement; it now also accepts a `features`
-   dict with no file at all. `gender` is no longer required. `cosinor_features`
-   and `data_summary` are gone from the response; new fields
-   (`prediction_method`, `model_type`, `features_used`, `data_quality_percent`,
-   `unavailable`, `explanations`, `can_predict`) replace them. See §4.5,
-   including the provenance caveat on the two ML tiers.
+9. **`biological_age_calculator` carries a reliability caveat.** The
+   response shape is stable and safe to build against, but read §4.5's
+   note on the model before presenting its number as authoritative in the
+   UI.
 
 ---
 
@@ -616,12 +613,11 @@ something triggered from an inferred suggestion.
 
 ---
 
-### 4.5 `biological_age_calculator` — ⚠️ biological age — rebuilt this session, read the caveat
+### 4.5 `biological_age_calculator` — ⚠️ biological age, read the caveat
 
-**Rebuilt since this doc was first written.** No more ENMO-timeseries CSV
-requirement — it now runs off ordinary daily wearable summaries
-(activity/steps, sleep, resting HR, HRV), and can be called with **no file
-at all** if the app already has those numbers. Two ways in:
+A single "missing-aware" Linear Regression model: it accepts any subset of
+12 recognised parameters and degrades gracefully as fewer are supplied,
+rather than requiring a fixed set. Two ways to call it:
 
 **A — `features` dict, no file, JSON:**
 
@@ -630,40 +626,53 @@ at all** if the app already has those numbers. Two ways in:
   "action": "biological_age_calculator",
   "chronological_age": 45,
   "gender": "male",
-  "features": { "activity_mean": 8000, "sleep_hours": 7.5, "resting_heart_rate": 60, "hrv": 55 }
+  "features": { "sleep_hours": 7.5, "resting_heart_rate": 60, "hrv": 55, "recovery_score": 70 }
 }
 ```
 
 **B — a file** (multipart, or JSON with a stored `attachment_id`): a CSV or
-JSON of daily metrics — columns are auto-detected by name across common
-vendor conventions (Apple/Garmin/WHOOP/Fitbit — `StepCount`, `totalSteps`,
-`restingHeartRate`, etc. all map to the same canonical field). Raw tri-axial
-accelerometer columns (`x_g`/`y_g`/`z_g`) are reduced to ENMO automatically
-if given instead.
+JSON of daily metrics. One row's worth of the 12 recognised columns is
+used — if the file has several rows, numeric columns are averaged and
+categorical columns take the first non-null value. This predicts from one
+snapshot; it does not aggregate a multi-day timeseries.
 
 ```js
 const fd = new FormData();
 fd.append("action", "biological_age_calculator");
 fd.append("chronological_age", "45");
-fd.append("gender", "male");           // accepted, not required — see below
+fd.append("gender", "male");
 fd.append("file", csvBlob, "daily_metrics.csv");
 ```
 
 | field | required | value |
 |---|---|---|
 | `chronological_age` | ✅ | number, 1–120 |
-| `gender` | no | echoed back in the response; not used by any model in the cascade today |
+| `gender` | no | an actual model input (one-hot encoded) — send it when you have it |
 | `return_features` | no | boolean, default `false` — file path only |
 | `features` | one of `features`/`attachments` required | object of biometric values — see the parameter table below |
 | `attachments` (or a stored `attachment_id`) | one of `features`/`attachments` required | one CSV/JSON file of daily metrics |
 
-Recognised `features` keys include `activity_mean`/`steps` (steps/day, 0–80000),
-`sleep_hours`/`sleep_mean` (hours, 0–24), `resting_heart_rate`/`resting_hr`
-(bpm, 25–130), `hrv` (ms, 1–300), `recovery_score` (0–100), `vo2_max`
-(10–90), `weight_kg`, `height_cm`, `systolic_bp`/`diastolic_bp`, and several
-sleep-stage/HR-zone breakdowns — an unrecognised key is ignored with a
-warning rather than rejected; an out-of-range value on a recognised key is a
-400.
+**Recognised `features` keys** (anything else is ignored, reported back in
+`additional_input_detected`, not rejected):
+
+| key | type / range | aliases also accepted |
+|---|---|---|
+| `height_cm` | numeric, 30–250 | `height` |
+| `weight_kg` | numeric, 1–500 | `weight` |
+| `hrv` | numeric, 0–1000 (ms) | — |
+| `resting_heart_rate` | numeric, 20–250 (bpm) | `resting_hr`, `rhr` |
+| `calories_burned` | numeric, 0–100000 (daily expenditure) | `calories` |
+| `recovery_score` | numeric, 0–100 | — |
+| `day_strain` | numeric, 0–100 | `strain` |
+| `sleep_hours` | numeric, 0–24 | `sleep`, `sleep_mean` |
+| `activity_type` | free string, e.g. `"Running"`, `"Yoga"`, `"Rest Day"` | — |
+| `fitness_level` | free string, e.g. `"Beginner"`, `"Advanced"` | — |
+| `gender` | free string, e.g. `"male"`/`"female"` | — |
+| `age` | filled in automatically from `chronological_age` — don't send it separately | — |
+
+A recognised key with an out-of-range or wrong-type value is a 400. At
+least one key besides `age` must end up usable, or the call returns
+`can_predict: false` (a 422) — see the status table below.
 
 Max **8 MB**, **1 file** (extras ignored, first used) for the file path.
 
@@ -671,46 +680,47 @@ Max **8 MB**, **1 file** (extras ignored, first used) for the file path.
 {
   "action": "biological_age_calculator",
   "can_predict": true,
-  "predicted_biological_age": 28.9,
+  "predicted_biological_age": 29.8,
   "chronological_age": 30.0,
   "gender": "male",
-  "biological_age_advance": -1.1,
-  "prediction_method": "ML Model - Model A (Full Feature Set)",
-  "model_type": "Scikit-Learn Random Forest ML Model",
+  "biological_age_advance": -0.2,
+  "prediction_method": "Missing-Aware Linear Regression Model",
+  "model_type": "Scikit-Learn Linear Regression (availability-mask features)",
   "model_description": "...",
-  "data_period": "Manual input",
-  "features_used": { "activity_mean": 8000.0, "sleep_mean": 7.5, "resting_heart_rate": 60.0, "hrv": 55.0 },
-  "unavailable": [{ "name": "Vo2 Max", "reason": "Parameter not present in uploaded dataset." }],
+  "data_period": "Single snapshot",
+  "features_used": { "age": 30.0, "gender": "male", "sleep_hours": 7.5, "resting_heart_rate": 60.0, "hrv": 55.0, "recovery_score": 70.0 },
+  "unavailable": [
+    { "name": "height_cm", "reason": "Not supplied, or supplied but invalid/unverified." }
+    /* ...one entry per unsupplied key... */
+  ],
   "additional_input_detected": [],
-  "data_quality_percent": 100.0,
-  "adjustments": [-1.1],
-  "explanations": ["Model A (Full Multi-Modal) inference: 28.9 yrs (-1.1 yrs from chronological age 30.0)...."]
+  "data_quality_percent": 50.0,
+  "adjustments": [],
+  "explanations": ["Missing-aware linear model inference: 29.8 yrs from 6 of 12 recognised parameters (age, gender, sleep_hours, resting_heart_rate, hrv, recovery_score).", "Not supplied or excluded: height_cm, weight_kg, calories_burned, activity_type, fitness_level, day_strain."]
   // + "features": {...} only when return_features=true (file path)
 }
 ```
 
-`prediction_method`/`model_type` tell you which tier answered: **Model A**
-(activity+sleep+resting HR+HRV, full ML), **Model B** (same minus HRV, ML),
-or the **Validated Fallback** (a clinical rule engine, not ML — used when
-only activity or sleep is available). `cosinor_features` and `data_summary`
-from the old CosinorAge response are gone — nothing produces them any more.
+`data_quality_percent` is `(recognised features supplied) / 12 * 100` — use
+it to show how complete the input was. `prediction_method`/`model_type`
+identify what answered (currently always the one model). `explanations` is
+plain-text, safe to show directly; `unavailable` lists which of the 12 keys
+weren't usable and why.
 
-> **Read before presenting this as authoritative:** the two ML models
-> (A/B) were trained on a public Kaggle dataset with **no held-out test
-> split**, against a **biological-age label computed by a formula**, not an
-> independently measured one — confirmed directly with whoever built them.
-> The near-perfect fit numbers baked into the model files reflect the model
-> reproducing that formula, not validated real-world accuracy. Treat a
-> result from Model A/B as an informed heuristic, not a clinical measurement,
-> until it's retrained on a documented dataset with a proper held-out
-> evaluation. This doesn't affect how you integrate it — the request/response
-> shape here is stable — but it should shape how confidently the number is
-> presented in the UI (e.g. not as a clinical result).
+> **Read before presenting this as authoritative.** This model was trained
+> on a public dataset against a **biological-age label computed by a
+> formula** from the same inputs (HRV, resting heart rate, sleep, recovery),
+> not an independently measured one. The source dataset also has a
+> confirmed data-quality defect: a small percentage of rows have physically
+> impossible values (e.g. `calories_burned` far outside any plausible
+> daily range) that weren't filtered out before training. Treat a result
+> from this model as an informed heuristic, not a clinical measurement —
+> present it to users accordingly (e.g. not as a medical result).
 
 | status | meaning |
 |---|---|
 | 400 | input validation (age out of range, neither `features` nor `attachments` given, an out-of-range feature value, missing/oversized/unreadable file) |
-| 422 | ran, but couldn't produce a prediction — too little recognised data even for the fallback tier (needs at least activity or sleep) |
+| 422 | ran, but couldn't produce a prediction — nothing recognised besides age; provide at least one real measurement |
 | 503 | biological-age module unavailable on this deploy |
 | 500 | internal processing error, with a specific message and stage in `error` — not the generic `"internal error"` other actions return |
 
