@@ -671,6 +671,13 @@ visually unmissable.
 Distinguish `hazard_level: "unknown"` (nobody has assessed it) from `"none"`
 (assessed, nothing found). Do not render "unknown" as safe.
 
+> **Since this was written**, `data` on this block also carries `chemicals[]`
+> and `additives[]` — the same rows filtered to hazard-flagged substances and
+> E-numbered/additive-function substances respectively — plus a `totals`
+> count for each, and each row/item now carries an `amount` field for a
+> declared quantity. See "`ingredient_table` data" in `flutter_api.md` for the
+> full shape; that document is kept current, this section is not.
+
 ---
 
 ## 7. Two flows to implement

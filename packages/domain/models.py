@@ -272,6 +272,10 @@ class ResolvedIngredient(Base):
     confidence: float = 0.0
     resolution_method: ResolutionMethod = ResolutionMethod.UNRESOLVED
     qualifiers: list[str] = Field(default_factory=list)
+    # A quantity the label declared next to this ingredient ("20%", "60mg").
+    # Rare outside supplement/nutrition panels — most INCI/food labels only
+    # imply concentration through declaration order. None when not stated.
+    amount: Optional[str] = None
 
     @property
     def resolved(self) -> bool:
@@ -307,6 +311,12 @@ class HazardFinding(Base):
     evidence: list[EvidenceRef] = Field(default_factory=list)
     rule_ids: list[str] = Field(default_factory=list)
     rules_version: str = "v1"
+    # Carried straight off the dossier (packages.storage.repositories.chemicals
+    # ChemicalRepository.get_many) so the chemicals/additives split in
+    # product_blocks() does not need its own DB round trip.
+    e_number: Optional[str] = None
+    chem_class: Optional[str] = None
+    functions: list[str] = Field(default_factory=list)
 
 
 class PersonalFlag(Base):

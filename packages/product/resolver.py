@@ -185,6 +185,7 @@ class IngredientResolver:
                 raw_token=token.text or token.raw,
                 position=token.position,
                 qualifiers=token.qualifiers,
+                amount=token.amount,
             )
             for token in tokens
         ]

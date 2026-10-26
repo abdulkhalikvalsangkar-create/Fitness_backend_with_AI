@@ -16,9 +16,11 @@ from typing import Any, Optional
 
 from packages.domain.enums import (
     BlockType,
+    HazardLevel,
     ProductUnidentifiedReason,
     SafetyClass,
     SafetyFlagKind,
+    Severity,
     Verdict,
 )
 from packages.domain.models import (
@@ -27,6 +29,8 @@ from packages.domain.models import (
     DataGap,
     Disclaimer,
     FaqItem,
+    HazardFinding,
+    PersonalFlag,
     ProductAnalysis,
     UserContext,
 )
@@ -298,6 +302,132 @@ _VERDICT_LEAD = {
     Verdict.INSUFFICIENT_DATA: "I couldn't read enough of the panel to judge this.",
 }
 
+# Dossier `functions` values (packages/storage/migrations/002_chemical_kb.sql,
+# seeded in scripts/seed_chemicals.py) that mark a substance as a food/cosmetic
+# additive even when it has no printed E-number — e.g. sodium benzoate is
+# declared by name on many Indian labels.
+_ADDITIVE_FUNCTIONS = {
+    "preservative", "colour", "colourant", "color", "colorant",
+    "emulsifier", "emulsifying salt", "stabiliser", "stabilizer", "sweetener",
+    "acidity regulator", "anti-caking agent", "anticaking agent", "antioxidant",
+    "thickener", "raising agent", "flavour enhancer", "flavor enhancer",
+    "humectant", "gelling agent", "bulking agent", "glazing agent",
+}
+
+_HAZARD_LEVELS_WORTH_FLAGGING = {HazardLevel.LOW, HazardLevel.MODERATE, HazardLevel.HIGH}
+
+
+def _has_hazard_signal(hazard: HazardFinding) -> bool:
+    """Worth a standalone row in the Chemicals tab: a real toxicological or
+    regulatory signal, not just "resolved to a known substance"."""
+    return (
+        hazard.hazard_level in _HAZARD_LEVELS_WORTH_FLAGGING
+        or hazard.endocrine_flag
+        or bool(hazard.banned_in)
+        or bool(hazard.restricted_in)
+        or bool(hazard.ghs_codes)
+    )
+
+
+def _is_additive(hazard: HazardFinding) -> bool:
+    if hazard.e_number:
+        return True
+    return bool({f.lower() for f in hazard.functions} & _ADDITIVE_FUNCTIONS)
+
+
+def _item_status(hazard: HazardFinding, flags: list[PersonalFlag]) -> str:
+    severities = {f.severity for f in flags}
+    if hazard.hazard_level == HazardLevel.HIGH or Severity.CRITICAL in severities or Severity.HIGH in severities:
+        return "avoid"
+    if (
+        hazard.hazard_level in (HazardLevel.MODERATE, HazardLevel.LOW)
+        or hazard.allergen_flag
+        or severities & {Severity.MODERATE, Severity.LOW}
+    ):
+        return "caution"
+    if hazard.hazard_level == HazardLevel.UNKNOWN:
+        return "unverified"
+    return "good"
+
+
+def _item_reason(hazard: HazardFinding, flags: list[PersonalFlag]) -> str:
+    """Short, deterministic — no model call. The app is free to compose its
+    own copy from the structured fields (functions, hazard_level, allergen,
+    endocrine, banned_in/restricted_in) instead of this string."""
+    if flags:
+        return flags[0].reason
+    if hazard.concentration_caveat:
+        return hazard.concentration_caveat
+
+    parts: list[str] = []
+    if hazard.functions:
+        parts.append(hazard.functions[0].capitalize())
+    if hazard.iarc_group:
+        parts.append(f"IARC group {hazard.iarc_group}")
+    if hazard.endocrine_flag:
+        parts.append("possible endocrine disruptor")
+    if hazard.banned_in:
+        parts.append(f"banned in {', '.join(hazard.banned_in)}")
+    elif hazard.restricted_in:
+        parts.append(f"restricted in {', '.join(hazard.restricted_in)}")
+    if hazard.allergen_flag:
+        parts.append("declarable allergen")
+
+    if parts:
+        return ", ".join(parts)
+    if hazard.hazard_level == HazardLevel.UNKNOWN:
+        return "not yet reviewed"
+    return "no concerns on record"
+
+
+def _chemical_additive_items(analysis: "ProductAnalysis") -> tuple[list[dict], list[dict]]:
+    """arch.md 8.6 + the app's three-tab scan screen: every resolved
+    ingredient with a hazard finding is considered for both the Chemicals tab
+    (has a real hazard/regulatory signal) and the Additives tab (has an
+    E-number or an additive-type function). A substance meeting both — e.g.
+    TBHQ, a preservative with a sensitivity flag — appears in both lists
+    rather than being forced into one."""
+    hazards_by_id = {h.chemical_id: h for h in analysis.hazards}
+    flags_by_position: dict[int, list[PersonalFlag]] = {}
+    for flag in analysis.personal_flags:
+        flags_by_position.setdefault(flag.position, []).append(flag)
+
+    chemicals: list[dict] = []
+    additives: list[dict] = []
+
+    for ingredient in analysis.ingredients:
+        if not ingredient.chemical_id:
+            continue
+        hazard = hazards_by_id.get(ingredient.chemical_id)
+        if hazard is None:
+            continue
+
+        position_flags = flags_by_position.get(ingredient.position, [])
+        item = {
+            "chemical_id": hazard.chemical_id,
+            "name": hazard.display_name,
+            "e_number": hazard.e_number,
+            "amount": ingredient.amount,
+            "functions": hazard.functions,
+            "hazard_level": str(hazard.hazard_level.value),
+            "allergen": hazard.allergen_flag,
+            "endocrine": hazard.endocrine_flag,
+            "banned_in": hazard.banned_in,
+            "restricted_in": hazard.restricted_in,
+            "review_status": hazard.review_status,
+            "personal_flags": [f.reason for f in position_flags],
+            "position": ingredient.position + 1,
+            "status": _item_status(hazard, position_flags),
+            "reason": _item_reason(hazard, position_flags),
+        }
+
+        if _has_hazard_signal(hazard):
+            chemicals.append(item)
+        if _is_additive(hazard):
+            additives.append(item)
+
+    return chemicals, additives
+
 
 def product_blocks(analysis: "ProductAnalysis") -> list[AnswerBlock]:
     """Structured blocks from the analysis. No model call anywhere in here.
@@ -378,6 +508,7 @@ def product_blocks(analysis: "ProductAnalysis") -> list[AnswerBlock]:
                 "position": ingredient.position + 1,
                 "name": ingredient.display_name or ingredient.raw_token,
                 "raw": ingredient.raw_token,
+                "amount": ingredient.amount,
                 "recognised": ingredient.resolved,
                 "resolution": str(ingredient.resolution_method.value),
                 "confidence": ingredient.confidence,
@@ -406,12 +537,24 @@ def product_blocks(analysis: "ProductAnalysis") -> list[AnswerBlock]:
             }
         )
 
+    chemicals, additives = _chemical_additive_items(analysis)
+
     blocks.append(
         AnswerBlock(
             block_id="ingredients_1",
             type=BlockType.INGREDIENT_TABLE,
             text=f"{len(analysis.ingredients)} ingredients read from the panel.",
-            data={"rows": rows, "kb_version": analysis.kb_version},
+            data={
+                "rows": rows,
+                "chemicals": chemicals,
+                "additives": additives,
+                "totals": {
+                    "ingredients": len(analysis.ingredients),
+                    "chemicals": len(chemicals),
+                    "additives": len(additives),
+                },
+                "kb_version": analysis.kb_version,
+            },
         )
     )
 

@@ -182,6 +182,9 @@ class HazardRulesEngine:
             hazard_level=baseline,
             evidence=evidence or [],
             rules_version=RULES_VERSION,
+            e_number=dossier.get("e_number"),
+            chem_class=dossier.get("chem_class"),
+            functions=list(dossier.get("functions") or []),
         )
 
         # Facts read straight off the assertions — no rule needed for these.

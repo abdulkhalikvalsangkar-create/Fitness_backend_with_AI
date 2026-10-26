@@ -1042,13 +1042,38 @@ These come from the deterministic rules engine, never the model — safe to
 `switch` on. `"Insufficient data"` means too little of the panel could be
 assessed, not "safe" — render it grey/neutral, never green.
 
-### `ingredient_table` rows
+### `ingredient_table` data
+
+`data` on this block now carries four things: the full panel (`rows`), two
+filtered views for a tabbed scan screen (`chemicals`, `additives`), and the
+counts for each (`totals`). All four are derived from the same analysis in one
+pass server-side — nothing here needs a second request or client-side
+classification.
+
+```jsonc
+{
+  "rows": [ /* every ingredient read from the panel, resolved or not */ ],
+  "chemicals": [ /* resolved ingredients with a real hazard/regulatory signal */ ],
+  "additives": [ /* resolved ingredients with an E-number or additive function */ ],
+  "totals": { "ingredients": 12, "chemicals": 1, "additives": 2 },
+  "kb_version": "v1"
+}
+```
+
+A substance can appear in both `chemicals` and `additives` — e.g. a
+preservative that is both E-numbered and hazard-flagged shows in both lists
+rather than being forced into one. It never appears in neither if it is
+hazard-flagged or E-numbered; a plain ingredient with no hazard signal and no
+additive function (e.g. "Water", "Wheat Flour") appears only in `rows`.
+
+#### `rows[]` — the full panel
 
 ```jsonc
 {
   "position": 10,
   "name": "hydrolysed groundnut protein",
   "raw": "hydrolysed groundnut protein",
+  "amount": null,                     // "20%" / "60mg" when the label states one, else null
   "recognised": false,
   "resolution": "unresolved",
   "confidence": 0.0,
@@ -1081,6 +1106,43 @@ identical to a fully-assessed, genuinely-hazard-free one.
 Distinguish `hazard_level: "unknown"` (nobody has assessed it, or it's still
 in draft) from `"none"` (assessed, nothing found). Never render `"unknown"`
 as safe.
+
+#### `chemicals[]` / `additives[]` — the two filtered tabs
+
+Same item shape in both lists:
+
+```jsonc
+{
+  "chemical_id": "tbhq",
+  "name": "TBHQ",
+  "e_number": null,                   // "E322" etc. when the dossier has one
+  "amount": null,                     // declared quantity, same as rows[].amount
+  "functions": ["preservative"],      // dossier function tags, e.g. ["preservative"], ["sweetener"]
+  "hazard_level": "high",             // none | low | moderate | high | unknown
+  "allergen": false,
+  "endocrine": false,
+  "banned_in": [],
+  "restricted_in": [],
+  "review_status": "published",
+  "personal_flags": [],               // reasons tied to this ingredient's position, if any
+  "position": 4,                      // 1-based, matches rows[].position
+  "status": "avoid",                  // avoid | caution | good | unverified
+  "reason": "Preservative"            // short, deterministic — compose your own copy from the fields above instead if you want different wording
+}
+```
+
+`status` is derived deterministically from `hazard_level` and any
+`personal_flags` tied to that ingredient: `avoid` (high hazard or a
+critical/high personal flag), `caution` (moderate/low hazard, an allergen, or
+a moderate/low personal flag), `unverified` (hazard_level is `unknown` —
+nobody has assessed it yet, never render this as safe), otherwise `good`.
+
+An item lands in `chemicals` when it carries a real hazard/regulatory signal
+(`hazard_level` of low/moderate/high, an endocrine flag, a GHS code, or a
+banned/restricted jurisdiction) and in `additives` when it has an `e_number`
+or a dossier function such as `preservative`, `colour`, `emulsifier`,
+`sweetener`, `acidity regulator`, `antioxidant`, `thickener` — regardless of
+whether it also appears in `chemicals`.
 
 ### `safety_notice` blocks
 

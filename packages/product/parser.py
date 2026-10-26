@@ -69,6 +69,10 @@ class ParsedToken:
     position: int
     qualifiers: list[str] = field(default_factory=list)
     is_trace: bool = False
+    # A declared quantity next to this token ("20%", "60mg"), if the label
+    # stated one. None otherwise — most ingredient panels only imply
+    # concentration through declaration order.
+    amount: Optional[str] = None
 
 
 @dataclass
@@ -210,13 +214,27 @@ def _expand_compound(raw_part: str) -> list[str]:
     return expanded
 
 
-def clean_token(raw: str) -> Optional[tuple[str, list[str]]]:
+def _extract_amount(text: str) -> Optional[str]:
+    """Pull a declared quantity ("20%", "60mg") out before it gets stripped.
+
+    Checked against the pre-qualifier text, so it catches both a top-level
+    "Sugar 20%" and a parenthetical "Vitamin C (60mg)" — the percentage/
+    quantity regexes run on whatever string they're given, parens or not.
+    """
+    match = _PERCENTAGE.search(text) or _QUANTITY.search(text)
+    if not match:
+        return None
+    return _WHITESPACE.sub("", match.group(0))
+
+
+def clean_token(raw: str) -> Optional[tuple[str, list[str], Optional[str]]]:
     """Normalise one token. Returns None when it is not an ingredient."""
     if not raw:
         return None
 
     text = _ASTERISK.sub(" ", raw)
     text = _LEADING_NUMBER.sub("", text)
+    amount = _extract_amount(text)
     text, qualifiers = _extract_qualifiers(text)
     text = _PERCENTAGE.sub(" ", text)
     text = _QUANTITY.sub(" ", text)
@@ -244,7 +262,7 @@ def clean_token(raw: str) -> Optional[tuple[str, list[str]]]:
         q for q in qualifiers
         if _KNOWN_QUALIFIERS.match(q.strip()) or len(q.split()) <= 12
     ]
-    return text, kept
+    return text, kept, amount
 
 
 def parse_panel(panel_text: str, *, had_header: bool = False, max_tokens: int = MAX_TOKENS) -> ParsedPanel:
@@ -279,7 +297,7 @@ def parse_panel(panel_text: str, *, had_header: bool = False, max_tokens: int = 
                         result.dropped.append(raw_part.strip()[:80])
                     continue
 
-                text_value, qualifiers = cleaned
+                text_value, qualifiers, amount = cleaned
                 key = text_value.lower()
                 if key in seen:
                     continue
@@ -296,6 +314,7 @@ def parse_panel(panel_text: str, *, had_header: bool = False, max_tokens: int = 
                         position=position,
                         qualifiers=qualifiers,
                         is_trace=is_trace,
+                        amount=amount,
                     )
                 )
                 position += 1
