@@ -15,7 +15,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from apps.api.actions import action_names, get_action
 from apps.api.security import Principal, authenticate, enforce_rate_limit
@@ -112,6 +112,36 @@ async def status_endpoint() -> dict[str, Any]:
         "actions": action_names(),
         "config_problems": problems if settings.debug else len(problems),
     }
+
+
+@app.get("/export/download")
+async def export_download(token: str) -> FileResponse:
+    """Serve a health-data export through its signed, expiring link.
+
+    The link itself is the credential (it is opened from an email, not the app),
+    so it is signed with a dedicated audience and expires; nothing else here
+    identifies the caller.
+    """
+    import jwt
+
+    from packages.account import export
+
+    try:
+        user_id, job_id = export.verify_link(token)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=410, detail="this download link has expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=404, detail="not found")
+
+    path = export.export_path(user_id, job_id)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(
+        path,
+        media_type="application/json",
+        filename="health-data-export.json",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.options("/")

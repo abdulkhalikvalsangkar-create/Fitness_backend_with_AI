@@ -164,6 +164,7 @@ class JobType(StrEnum):
     ETL_CHEMICAL_KB = "etl_chemical_kb"
     EMBEDDING_BACKFILL = "embedding_backfill"
     OCR = "ocr"
+    DATA_EXPORT = "data_export"
 
 
 class JobStatus(StrEnum):

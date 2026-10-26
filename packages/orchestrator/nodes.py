@@ -686,9 +686,10 @@ def _load_attachment_bytes(state: ConversationState, session: Session) -> list[b
 
 
 def restaurant_analyzer(state: ConversationState, session: Session) -> ConversationState:
+    place_id = (state.input.client_hints or {}).get("place_id")
     job_id = JobRepository(session).enqueue(
         job_type=JobType.RESTAURANT_INVESTIGATION,
-        payload={"query": state.input.text},
+        payload={"query": state.input.text or place_id, "place_id": place_id},
         user_id=state.request.user_id,
         priority=150,
     )

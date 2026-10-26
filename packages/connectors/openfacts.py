@@ -48,6 +48,8 @@ class ProductRecord:
     name: Optional[str] = None
     brand: Optional[str] = None
     category: Optional[str] = None
+    quantity: Optional[str] = None
+    image_url: Optional[str] = None
     product_class: Optional[str] = None
     ingredients_text: Optional[str] = None
     allergens: list[str] = field(default_factory=list)
@@ -155,6 +157,8 @@ class OpenFactsConnector:
             name=name,
             brand=(product.get("brands") or "").split(",")[0].strip() or None,
             category=(product.get("categories") or "").split(",")[0].strip() or None,
+            quantity=(product.get("quantity") or "").strip() or None,
+            image_url=(product.get("image_url") or "").strip() or None,
             product_class=product_class,
             ingredients_text=ingredients or None,
             allergens=allergens,

@@ -7,6 +7,7 @@ memory summarisation, aggregate rebuilds, embedding backfills and the sweeps.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -79,6 +80,7 @@ def rerun_product_scan(ctx: JobContext) -> dict[str, Any]:
         enqueue_research=False,
     )
     from packages.orchestrator.templates import product_blocks
+    from packages.product.summary import product_summary
 
     failed_dependencies = [
         row["job_id"] for row in dependencies if row["status"] == "failed"
@@ -88,6 +90,7 @@ def rerun_product_scan(ctx: JobContext) -> dict[str, Any]:
         "status": "completed",
         "scan_type": "product",
         "analysis": analysis.model_dump(mode="json"),
+        **product_summary(analysis),
         "blocks": [block.model_dump(mode="json") for block in product_blocks(analysis)],
         "failed_dependencies": failed_dependencies,
         "trace": trace.__dict__,
@@ -454,6 +457,11 @@ def investigate_restaurant(ctx: JobContext) -> dict[str, Any]:
     return {
         "query": query,
         "place_resolved": report.place.resolved,
+        "place": {
+            "place_id": report.place.place_id,
+            "name": report.place.name,
+            "address": report.place.address,
+        },
         "summary": report.summary_line(),
         "findings": report.to_blocks(),
         "no_adverse_findings": report.no_adverse_findings,
@@ -481,6 +489,55 @@ def run_ocr(ctx: JobContext) -> dict[str, Any]:
         "cached": result.cached,
         "chars": len(result.text),
         "error": result.error,
+    }
+
+
+@handler(JobType.DATA_EXPORT)
+def export_user_data(ctx: JobContext) -> dict[str, Any]:
+    """Build the user's data export and hand back a signed, expiring link.
+
+    The owner comes from the job row (`ctx.user_id`), never from the payload:
+    `job_enqueue` lets a caller supply an arbitrary payload, and an export of
+    someone else's data must not be one `user_id` away.
+    """
+    from packages.account import export
+    from packages.storage.db import session_scope
+
+    user_id = ctx.user_id
+    if not user_id:
+        raise ValueError("data_export requires a job owner")
+
+    def progress(stage: str, pct: int) -> None:
+        # A separate transaction: the handler's own is not committed until the
+        # job ends, and the app polls job_status while it runs.
+        try:
+            with session_scope() as other:
+                other.execute(
+                    text("UPDATE job SET result = :res WHERE job_id = :jid AND status = 'running'"),
+                    {"jid": ctx.job_id, "res": json.dumps({"stage": stage, "progress": pct})},
+                )
+        except Exception:
+            logger.exception("could not record export progress")
+
+    data = export.collect(ctx.session, user_id, progress)
+    progress("writing file", 98)
+    path = export.write_export(user_id, ctx.job_id, data)
+
+    expires_at = export.link_expiry()
+    url = export.download_url(export.sign_link(user_id, ctx.job_id, expires_at))
+
+    email_row = ctx.session.execute(
+        text("SELECT email FROM app_user WHERE user_id = :uid"), {"uid": user_id}
+    ).first()
+    emailed = export.send_link_email((email_row[0] if email_row else None) or "", url, expires_at)
+
+    return {
+        "stage": "done",
+        "progress": 100,
+        "download_url": url,
+        "expires_at": expires_at.isoformat(),
+        "size_bytes": path.stat().st_size,
+        "emailed": emailed,
     }
 
 
@@ -544,5 +601,13 @@ def run_maintenance(session) -> dict[str, int]:
     except Exception:
         logger.exception("blob purge failed; continuing")
         stats["blobs_purged"] = 0
+
+    try:
+        from packages.account.export import purge_expired_files
+
+        stats["export_files_purged"] = purge_expired_files()
+    except Exception:
+        logger.exception("export purge failed; continuing")
+        stats["export_files_purged"] = 0
 
     return stats

@@ -53,4 +53,18 @@ def verify_id_token(token: str) -> FirebaseIdentity:
         email=decoded.get("email"),
         email_verified=bool(decoded.get("email_verified", False)),
         display_name=decoded.get("name"),
+        auth_time=int(decoded["auth_time"]) if decoded.get("auth_time") is not None else None,
     )
+
+
+def delete_user(uid: str) -> bool:
+    """Delete the Firebase account. Returns False if it was already gone, so a
+    retried account deletion is idempotent."""
+    _ensure_initialized()
+    from firebase_admin import auth
+
+    try:
+        auth.delete_user(uid)
+    except auth.UserNotFoundError:
+        return False
+    return True

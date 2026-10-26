@@ -200,6 +200,16 @@ class RestaurantAnalyzer:
         unidentified place would read as reassurance we have not earned.
         """
         if place_id:
+            from packages.restaurant import places
+
+            fetched = places.details(place_id)
+            if fetched is not None:
+                return ResolvedPlace(
+                    place_id=fetched.place_id,
+                    name=fetched.name,
+                    address=fetched.address,
+                    confidence=1.0,
+                )
             return ResolvedPlace(place_id=place_id, name=query, confidence=1.0)
 
         logger.info("place resolution unavailable: no Places provider configured")

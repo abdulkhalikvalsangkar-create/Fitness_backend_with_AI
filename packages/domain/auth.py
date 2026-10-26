@@ -49,3 +49,6 @@ class FirebaseIdentity(BaseModel):
     email: Optional[str] = None
     email_verified: bool = False
     display_name: Optional[str] = None
+    # Epoch seconds of the user's last interactive sign-in; destructive actions
+    # such as account deletion require this to be recent.
+    auth_time: Optional[int] = None

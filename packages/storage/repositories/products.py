@@ -44,7 +44,7 @@ class ProductRepository:
         params = {f"b{i}": b for i, b in enumerate(candidates)}
         row = self.session.execute(
             text(
-                f"SELECT product_id, barcode, name, brand, category, product_class, "
+                f"SELECT product_id, barcode, name, brand, category, quantity, image_url, product_class, "
                 f"       ingredients_text, parsed_ingredients, source, confidence, fetched_at "
                 f"FROM product "
                 f"WHERE barcode IN ({placeholders}) "
@@ -65,6 +65,8 @@ class ProductRepository:
         name: Optional[str] = None,
         brand: Optional[str] = None,
         category: Optional[str] = None,
+        quantity: Optional[str] = None,
+        image_url: Optional[str] = None,
         product_class: Optional[str] = None,
         ingredients_text: Optional[str] = None,
         parsed_ingredients: Optional[list] = None,
@@ -84,15 +86,17 @@ class ProductRepository:
             text(
                 """
                 INSERT INTO product (product_id, barcode, barcode_format, name, brand, category,
-                                     product_class, ingredients_text, parsed_ingredients,
+                                     quantity, image_url, product_class, ingredients_text, parsed_ingredients,
                                      source, confidence, fetched_at, expires_at)
                 VALUES (:pid, :barcode, :fmt, :name, :brand, :category,
-                        :pclass, :ingredients, :parsed,
+                        :quantity, :image_url, :pclass, :ingredients, :parsed,
                         :source, :confidence, :fetched, :expires)
                 ON DUPLICATE KEY UPDATE
                     name = COALESCE(VALUES(name), name),
                     brand = COALESCE(VALUES(brand), brand),
                     category = COALESCE(VALUES(category), category),
+                    quantity = COALESCE(VALUES(quantity), quantity),
+                    image_url = COALESCE(VALUES(image_url), image_url),
                     product_class = COALESCE(VALUES(product_class), product_class),
                     ingredients_text = COALESCE(VALUES(ingredients_text), ingredients_text),
                     parsed_ingredients = COALESCE(VALUES(parsed_ingredients), parsed_ingredients),
@@ -109,6 +113,8 @@ class ProductRepository:
                 "name": name,
                 "brand": brand,
                 "category": category,
+                "quantity": quantity,
+                "image_url": image_url,
                 "pclass": product_class,
                 "ingredients": ingredients_text,
                 "parsed": json.dumps(parsed_ingredients) if parsed_ingredients else None,
@@ -128,6 +134,8 @@ class ProductRepository:
             name=row.get("name"),
             brand=row.get("brand"),
             category=row.get("category"),
+            quantity=row.get("quantity"),
+            image_url=row.get("image_url"),
             source=row.get("source"),
             confidence=float(row.get("confidence") or 0),
             fetched_at=row.get("fetched_at"),

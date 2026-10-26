@@ -31,8 +31,9 @@ Read this section first — it's the reason this file exists.
    strings), or `preferences` (list of strings) — all of which the backend
    accepts and actually uses (goals/preferences are rendered straight into
    what the assistant reads about the user). See §4.4.
-2. **`date_of_birth` is write-only.** You can send it and it is stored, but
-   nothing in the backend ever reads it back or derives `age_band` from it.
+2. **`date_of_birth` is returned by `context.profile`, but the assistant
+   does not use it.** You can send it and read it back (use it to fill the
+   Profile date picker), but nothing in the backend derives `age_band` from it.
    If you want the assistant to know the user's age, you must send
    `age_band` yourself — `date_of_birth` alone does nothing. See §4.4.
 3. **Health metric names are an allowlist, silently.** `sync.metrics[].metric`
@@ -306,7 +307,7 @@ table structure, and `personal_flags`.
 
 ---
 
-### 4.2 `scan` — ✅ product; ⛔ restaurant — analyse images, product or place
+### 4.2 `scan` — ✅ product; ⚠️ restaurant (place search live, evidence stages not connected — see §4.13) — analyse images, product or place
 
 **Multipart only.** Base64 is rejected everywhere in this API.
 
@@ -399,6 +400,33 @@ timeout:
 ```cron
 * * * * * cd /home/USER/fitness-api && /home/USER/virtualenv/fitness-api/3.12/bin/python -m apps.worker.worker --once >> /home/USER/worker.log 2>&1
 ```
+
+---
+
+#### Product identity, how it was identified, and a score
+
+Every product `scan` response (and each `scan_job_results[]` entry) carries,
+at the top level:
+
+```jsonc
+{ "product": { "name": "Choco Bar", "brand": "Acme", "quantity": "50 g",
+               "barcode": "8901234567890", "image_url": "https://…/front.jpg" },
+  "identified_via": "barcode",        // "barcode" | "ocr" | "text"
+  "score": { "value": 72, "scale_max": 100, "label": "Use with caution" } }
+```
+
+* `product.*` fields are `null` when unknown; `barcode` is the decoded code
+  whenever one was read, even if the ingredients then had to be read by OCR.
+* `identified_via`: `barcode` = the code matched a product record that
+  supplied the ingredients; `ocr` = ingredients were read from the label photo
+  (this includes "barcode decoded but not in any database"); `text` is
+  reserved for typed ingredients and is not produced yet. `null` when the
+  product could not be identified at all.
+* `score` is derived from the rules-engine verdict and findings and never
+  contradicts it (Generally suitable 70–100, Use with caution 40–69, Not
+  recommended 0–39). It is `null` for "Insufficient data" — hide the row.
+* `quantity` / `image_url` only exist for products found in Open Food / Beauty /
+  Products Facts; products read by OCR have them `null`.
 
 ---
 
@@ -735,7 +763,9 @@ weren't usable and why.
 ```jsonc
 {
   "action": "context",
-  "profile": { "display_name": "...", "age_band": "25-34", "goals": [...], "..." : "..." },
+  "profile": { "display_name": "...", "date_of_birth": "1994-03-02", "age_band": "25-34",
+               "sex": "female", "height_cm": 168, "weight_kg": 61.5,
+               "pregnancy_status": "none", "goals": ["run a 10k"], "preferences": [] },
   "profile_version": 4,
   "consent": ["profile", "vitals"],
   "aggregate_versions": { "vitals": "12", "nutrition": "8" },
@@ -748,6 +778,13 @@ Useful for a "your data" debug screen. Note `latest_metrics` here is
 ones outside the `KNOWN_METRICS` allowlist from §4.4. That's the one place in
 the API where an off-list metric name is visible; it still won't be used by
 chat.
+
+---
+
+`context.profile` always returns `date_of_birth` (ISO date or `null`), `goals`
+(list, possibly empty) and `pregnancy_status` (string or `null`), so the Profile
+screen can be filled from this one call. `date_of_birth` is for display only —
+it is never put in the assistant's prompt; send `age_band` for that.
 
 ---
 
@@ -825,6 +862,149 @@ feature explicitly calls for starting one of these job types yourself:
 (403 otherwise). Not used by the mobile client; listed here only so you don't
 accidentally wire them up. Two settings relevant to what the app *displays*
 (but not callable by the app) are covered in §5.
+
+---
+
+### 4.11 `auth.delete_account` — ✅ permanently delete the account
+
+Authenticated (Bearer). The app re-authenticates with Firebase (password
+dialog) and sends the **fresh** ID token:
+
+```jsonc
+{ "action": "auth.delete_account", "firebase_id_token": "<fresh token>" }
+```
+```jsonc
+{ "action": "auth.delete_account", "deleted": true, "firebase_deleted": true,
+  "removed": { "profile": 1, "metrics": 42, "chat_history": 18, "attachments": 3 } }
+```
+
+Deletes profile, metrics, nutrition, activities, medical rows, memories, chat
+history and summaries, attachments (rows, files and their OCR text), jobs,
+reminders, cached answers, consents and **all sessions** (refresh tokens stop
+working), then deletes the Firebase user.
+
+| status | meaning |
+|---|---|
+| 400 | `firebase_id_token` missing |
+| 401 | token invalid, or the sign-in is older than 5 minutes (`recent sign-in required`) — re-authenticate and retry |
+| 403 | the token belongs to a different Firebase account than the signed-in one |
+| 502 | data **was** deleted but removing the Firebase user failed — call again with a fresh token to finish |
+
+Idempotent: calling again after success returns `deleted: true`
+(`firebase_deleted: false` when the Firebase user was already gone). After
+success, discard all local tokens. An access token issued earlier stays valid
+until it expires (≤15 min), so make no further calls with it.
+
+---
+
+### 4.12 `export.request` — ✅ export all health data
+
+```jsonc
+{ "action": "export.request" }
+```
+```jsonc
+{ "action": "export.request", "job_id": "...", "status": "queued", "poll_action": "job_status" }
+```
+
+Poll `{ "action": "job_status", "job_id": "..." }`. `job.status` goes
+`queued → running → succeeded | failed`. While `running`,
+`job.result = { "stage": "reading metrics", "progress": 40 }` (0–100). On
+success:
+
+```jsonc
+"result": { "stage": "done", "progress": 100,
+            "download_url": "https://…/export/download?token=…",
+            "expires_at": "2026-10-25T10:00:00+00:00", "size_bytes": 48211,
+            "emailed": true }
+```
+
+`download_url` is a signed link that expires after 24 h (`EXPORT_LINK_TTL_HOURS`).
+Opening it needs no Authorization header and downloads one JSON file (profile
+incl. date of birth, metrics, nutrition, activities, medical, memories,
+reminders, chat history, attachment list). `emailed` is true only when the
+server has SMTP configured — **do not promise an email unless the deployment
+has it**; `download_url` is always present. Requesting again within 24 h
+returns the same job rather than starting another. An expired link returns 410.
+
+---
+
+### 4.13 `places.search` — ✅ restaurant search / autocomplete
+
+```jsonc
+{ "action": "places.search", "query": "truffles", "lat": 12.93, "lng": 77.62,   // lat/lng optional (bias only)
+  "session_token": "uuid-per-typing-session", "limit": 5 }
+```
+```jsonc
+{ "action": "places.search", "query": "truffles",
+  "places": [{ "place_id": "ChIJ…", "name": "Truffles", "address": "Koramangala, Bengaluru" }] }
+```
+
+`query` ≥ 2 chars. Reuse one `session_token` for all keystrokes of one search.
+A 503 means the place provider is not configured or unreachable (an empty
+`places` list means genuinely no match). Pass the chosen `place_id` to `scan`:
+
+```jsonc
+{ "action": "scan", "scan_type": "restaurant", "place_id": "ChIJ…", "message": "Truffles" }
+```
+
+Without a `place_id` nothing resolves and the result is `place_resolved: false`.
+
+`scan_job_results[0]` for a restaurant:
+
+```jsonc
+{ "query": "Truffles", "place_resolved": true,
+  "place": { "place_id": "ChIJ…", "name": "Truffles", "address": "Koramangala, Bengaluru" },
+  "summary": "No adverse findings located for Truffles in place resolution. I could not check regulatory records, recall notices, news, public complaints, so this is not a complete picture.",
+  "no_adverse_findings": true,
+  "stages_completed": ["place resolution"],
+  "stages_unavailable": ["regulatory records", "recall notices", "news", "public complaints"],
+  "findings": [{ "kind": "inspection|licence|recall|news|complaint|closure",
+                 "scope": "branch|brand|unresolved", "summary": "…", "source": "…",
+                 "url": "…", "date": "2026-03-01", "verified": true,
+                 "counts_towards_assessment": true }] }
+```
+
+⚠️ **The four evidence stages (regulatory records, recall notices, news, public
+complaints) have no data source connected yet.** Today they are always listed in
+`stages_unavailable` and `findings` is empty. Show them as "not checked", never
+as "all clear": `no_adverse_findings: true` with unavailable stages means
+"nothing was checked", not "nothing was found".
+
+---
+
+### 4.14 `reminders` — ✅ create / list / update / delete
+
+Categories: `dosage`, `feeding`, `medication`, `activity`, `health`, `petcare`.
+
+```jsonc
+{ "action": "reminders", "op": "create",
+  "category": "dosage", "title": "Vitamin D", "subtitle": "1 tablet",
+  "time": "08:30",                 // required, 24-hour HH:mm
+  "days": [1, 3, 5],               // optional, 1 = Mon … 7 = Sun  -> weekly
+  "date": "2026-11-02",            // optional, YYYY-MM-DD          -> one-off
+  "enabled": true,                 // optional, default true
+  "supplement_id": "…", "pet_id": "…", "item": "…" }   // optional, stored as sent
+```
+
+Schedule: `date` = one-off; `days` = weekly on those days; neither = daily.
+Sending both `date` and `days` is a 400. Responses carry the reminder:
+
+```jsonc
+{ "action": "reminders", "reminder": { "id": "…", "category": "dosage", "enabled": true,
+    "title": "Vitamin D", "subtitle": "1 tablet", "time": "08:30", "date": null,
+    "days": [1, 3, 5], "supplement_id": null, "pet_id": null, "item": null } }
+```
+
+| op | request | response |
+|---|---|---|
+| `list` | optional `category` | `{ "reminders": [reminder, …] }` ordered by time |
+| `create` | fields above (`category`, `title`, `time` required) | `{ "reminder": … }` |
+| `update` | `id` + any fields to change (setting `date` clears `days` and vice versa) | `{ "reminder": … }` |
+| `delete` | `id` | `{ "deleted": true or false, "id": "…" }` (already gone → `false`, not an error) |
+
+400 for invalid fields (the message names the field), 404 for `update` on an
+unknown id. Max 200 reminders per user. The backend only stores reminders —
+scheduling the local/push notification is the app's job.
 
 ---
 

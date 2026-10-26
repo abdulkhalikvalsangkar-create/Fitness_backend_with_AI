@@ -25,6 +25,7 @@ from packages.domain.enums import ConsentScope, JobType
 from packages.domain.models import Attachment
 from packages.health import build_dashboard
 from packages.orchestrator import new_state, run_turn, total_latency_ms
+from packages.product.summary import product_summary
 from packages.storage.db import session_scope
 from packages.storage.repositories.cache import CacheRepository
 from packages.storage.repositories.conversation import ConversationRepository
@@ -359,6 +360,10 @@ def handle_chat(body: dict, principal: Principal, session: Session) -> dict[str,
         "pending_jobs": pending_jobs,
         "latency_ms": total_latency_ms(state),
     }
+
+    analysis = getattr(state.candidates, "analyzer_result", None)
+    if analysis is not None:
+        response.update(product_summary(analysis))
 
     # route_debug is internal (arch.md 10); it ships only when the caller is an
     # admin and asked for it.
@@ -722,12 +727,19 @@ def handle_scan(body: dict, principal: Principal, session: Session) -> dict[str,
             detail="scan_type must be 'product' or 'restaurant'",
         )
 
+    # A restaurant is identified by the place_id the app got from
+    # `places.search`; it rides to the restaurant node as a client hint.
+    client_hints = body.get("client_hints") if isinstance(body.get("client_hints"), dict) else {}
+    if scan_type == "restaurant" and body.get("place_id"):
+        client_hints = {**client_hints, "place_id": str(body["place_id"])[:256]}
+
     result = handle_chat(
         {
             **body,
             "action": "chat",
             "message": body.get("message") or "",
             "scan_type": scan_type,
+            "client_hints": client_hints,
         },
         principal,
         session,
@@ -827,6 +839,11 @@ def _complete_scan_jobs(
         ).strip()
     result["pending_jobs"] = []
     result["scan_job_results"] = completed
+    # The finished parent job re-ran the analysis with the researched
+    # chemicals, so its identity/score supersede the provisional ones.
+    if completed and "product" in completed[0]:
+        for key in ("product", "identified_via", "score"):
+            result[key] = completed[0].get(key)
     return result
 
 
@@ -1241,3 +1258,9 @@ def handle_admin_jobs(body: dict, principal: Principal, session: Session) -> dic
         return {"action": "admin.jobs", "reaped": repo.reap_expired_leases()}
 
     raise HTTPException(status_code=400, detail=f"unknown jobs op '{op}'")
+
+
+# Account, reminder and place-search actions live in their own module; importing
+# it here registers them in the same table. Must stay at the bottom — the module
+# imports `action` from this one.
+from apps.api import app_actions as _app_actions  # noqa: E402,F401

@@ -98,6 +98,10 @@ class SectionMeta(Base):
 
 class Profile(Base):
     display_name: Optional[str] = None
+    # Returned by the `context` action so the app's Profile screen can fill its
+    # date picker. The assistant does not read it (chains/personal.py renders
+    # only age_band) — keep it out of any prompt-building code.
+    date_of_birth: Optional[date] = None
     age_band: Optional[str] = None
     sex: Optional[str] = None
     height_cm: Optional[float] = None
@@ -329,6 +333,8 @@ class ProductIdentity(Base):
     name: Optional[str] = None
     brand: Optional[str] = None
     category: Optional[str] = None
+    quantity: Optional[str] = None
+    image_url: Optional[str] = None
     source: Optional[str] = None
     confidence: float = 0.0
     fetched_at: Optional[datetime] = None
@@ -337,6 +343,11 @@ class ProductIdentity(Base):
 class ProductAnalysis(Base):
     identity: Optional[ProductIdentity] = None
     unidentified_reason: Optional[ProductUnidentifiedReason] = None
+    # How the ingredient panel was obtained: "barcode" (decoded code matched a
+    # product record that carried ingredients), "ocr" (read from the label
+    # photo — including when a barcode was decoded but had no usable record)
+    # or "text" (typed/pasted ingredients; no code path produces this yet).
+    identified_via: Optional[str] = None
     ingredients: list[ResolvedIngredient] = Field(default_factory=list)
     hazards: list[HazardFinding] = Field(default_factory=list)
     personal_flags: list[PersonalFlag] = Field(default_factory=list)

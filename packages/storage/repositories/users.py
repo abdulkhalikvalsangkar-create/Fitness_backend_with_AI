@@ -156,7 +156,7 @@ class UserRepository:
         """Returns the profile and its version (the cache fingerprint input)."""
         row = self.session.execute(
             text(
-                "SELECT display_name, age_band, sex, height_cm, weight_kg, pregnancy_status, "
+                "SELECT display_name, date_of_birth, age_band, sex, height_cm, weight_kg, pregnancy_status, "
                 "       goals, preferences, version "
                 "FROM user_profile WHERE user_id = :uid"
             ),
@@ -169,6 +169,7 @@ class UserRepository:
         return (
             Profile(
                 display_name=row["display_name"],
+                date_of_birth=row["date_of_birth"],
                 age_band=row["age_band"],
                 sex=row["sex"],
                 height_cm=float(row["height_cm"]) if row["height_cm"] is not None else None,

@@ -306,6 +306,30 @@ def _with_ocr_host(hosts: list[str]) -> list[str]:
 
 
 @dataclass(frozen=True)
+class PlacesSettings:
+    """Google Places API (New) — restaurant search and place resolution."""
+
+    api_key: str = field(default_factory=lambda: _env("GOOGLE_PLACES_API_KEY", ""))
+    timeout_seconds: int = field(default_factory=lambda: _env_int("PLACES_TIMEOUT", 8))
+
+
+@dataclass(frozen=True)
+class ExportSettings:
+    """Health-data export: where files live and how long a link works."""
+
+    dir: Path = field(default_factory=lambda: Path(_env("EXPORT_DIR", str(ROOT / "var" / "exports"))))
+    link_ttl_hours: int = field(default_factory=lambda: _env_int("EXPORT_LINK_TTL_HOURS", 24))
+    # Public origin used to build download links, e.g. https://api.example.com
+    public_base_url: str = field(default_factory=lambda: _env("PUBLIC_BASE_URL", ""))
+    # Optional: when set, the link is also emailed to the account address.
+    smtp_host: str = field(default_factory=lambda: _env("SMTP_HOST", ""))
+    smtp_port: int = field(default_factory=lambda: _env_int("SMTP_PORT", 587))
+    smtp_user: str = field(default_factory=lambda: _env("SMTP_USER", ""))
+    smtp_password: str = field(default_factory=lambda: _env("SMTP_PASSWORD", ""))
+    smtp_from: str = field(default_factory=lambda: _env("SMTP_FROM", ""))
+
+
+@dataclass(frozen=True)
 class SecuritySettings:
     jwt_secret: str = field(default_factory=lambda: _env("JWT_SECRET", ""))
     jwt_algorithm: str = field(default_factory=lambda: _env("JWT_ALGORITHM", "HS256"))
@@ -338,7 +362,7 @@ class SecuritySettings:
                 "FETCH_ALLOWLIST",
                 "world.openfoodfacts.org,world.openbeautyfacts.org,world.openproductsfacts.org,"
                 "pubchem.ncbi.nlm.nih.gov,eutils.ncbi.nlm.nih.gov,www.ebi.ac.uk,api.crossref.org,"
-                "api.openalex.org,api.semanticscholar.org",
+                "api.openalex.org,api.semanticscholar.org,places.googleapis.com",
             )
         )
     )
@@ -364,6 +388,8 @@ class Settings:
     jobs: JobSettings = field(default_factory=JobSettings)
     storage: StorageSettings = field(default_factory=StorageSettings)
     security: SecuritySettings = field(default_factory=SecuritySettings)
+    places: PlacesSettings = field(default_factory=PlacesSettings)
+    export: ExportSettings = field(default_factory=ExportSettings)
 
     def validate(self) -> list[str]:
         """Return a list of configuration problems. Empty means good to go."""

@@ -62,6 +62,7 @@ class AnalysisTrace:
     resolve_ms: float = 0.0
     rules_ms: float = 0.0
     external_calls: int = 0
+    identified_via: Optional[str] = None
     ocr_cache_hits: int = 0
     notes: list[str] = field(default_factory=list)
 
@@ -111,6 +112,7 @@ class ProductAnalyzer:
 
         identity, ingredients_text, resolved_class = self._identify(images, trace, product_class)
         analysis.identity = identity
+        analysis.identified_via = trace.identified_via
 
         if not ingredients_text:
             analysis.unidentified_reason = self._failure_reason(identity, trace)
@@ -201,6 +203,8 @@ class ProductAnalyzer:
                 ingredients_text = cached.get("ingredients_text") or ""
                 resolved_class = cached.get("product_class") or resolved_class
                 trace.notes.append("product served from local cache")
+                if ingredients_text.strip():
+                    trace.identified_via = "barcode"
             else:
                 # 2b. upstream cascade
                 from packages.connectors.openfacts import OpenFactsConnector
@@ -216,6 +220,8 @@ class ProductAnalyzer:
                         name=record.name,
                         brand=record.brand,
                         category=record.category,
+                        quantity=record.quantity,
+                        image_url=record.image_url,
                         product_class=resolved_class,
                         ingredients_text=record.ingredients_text,
                         source=record.source,
@@ -228,11 +234,15 @@ class ProductAnalyzer:
                         name=record.name,
                         brand=record.brand,
                         category=record.category,
+                        quantity=record.quantity,
+                        image_url=record.image_url,
                         source=record.source,
                         confidence=record.confidence,
                         fetched_at=record.fetched_at,
                     )
                     ingredients_text = record.ingredients_text or ""
+                    if ingredients_text.strip():
+                        trace.identified_via = "barcode"
                 else:
                     identity = ProductIdentity(
                         barcode=scan.barcode,
@@ -255,6 +265,8 @@ class ProductAnalyzer:
             trace.external_calls += sum(1 for r in results if not r.cached)
 
             ingredients_text = stitch(results)
+            if ingredients_text:
+                trace.identified_via = "ocr"
             if not ingredients_text:
                 errors = [r.error for r in results if r.error]
                 if errors:
