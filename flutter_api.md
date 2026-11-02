@@ -1008,6 +1008,66 @@ scheduling the local/push notification is the app's job.
 
 ---
 
+### 4.15 Forgot password (email → 5-digit OTP → new password) — ✅
+
+Four actions, all **unauthenticated** (no `Authorization` header). They map to the
+screens: email → OTP → new password → success. The password is changed in
+Firebase Authentication; all existing sessions (Firebase and this API) are
+signed out afterwards, so the success screen should send the user to Login.
+
+**1. Email screen — `auth.password_reset.request`**
+```jsonc
+{ "action": "auth.password_reset.request", "email": "jane@example.com" }
+```
+```jsonc
+{ "action": "auth.password_reset.request", "sent": true,
+  "otp_length": 5, "expires_in": 600, "resend_after": 60 }
+```
+The response is **identical whether or not the email has an account** (and for
+accounts that only use Google/Apple sign-in, which have no password). Show
+"If an account exists, we've sent a code" — never "email not found".
+
+**2. Resend — `auth.password_reset.resend`**
+Same request and response as above (action name differs). It issues a new code and
+the previous one stops working. Start a `resend_after`-second countdown on the OTP
+screen and disable the button until it ends.
+
+**3. OTP screen — `auth.password_reset.verify`**
+```jsonc
+{ "action": "auth.password_reset.verify", "email": "jane@example.com", "otp": "48213" }
+```
+```jsonc
+{ "action": "auth.password_reset.verify", "verified": true,
+  "reset_token": "<jwt>", "expires_in": 600 }
+```
+Keep `reset_token` in memory only. A wrong, expired or unknown code always returns
+the same `400 invalid or expired code`. After **5 wrong attempts** the code is
+void (`429 too many incorrect attempts; request a new code`) — send the user back to
+resend.
+
+**4. New-password screen — `auth.password_reset.confirm`**
+```jsonc
+{ "action": "auth.password_reset.confirm", "reset_token": "<jwt>", "new_password": "NewPassw0rd!" }
+```
+```jsonc
+{ "action": "auth.password_reset.confirm", "reset": true }
+```
+Password rules (validate in the UI too): 8–128 characters, at least one letter
+and one number. A rejected password returns `400` with the reason and the token
+stays usable, so the user can correct it and retry. The token is single-use.
+
+| status | meaning |
+|---|---|
+| 400 | invalid email / code / password; `invalid or expired code`; expired or used reset token |
+| 429 | resend cooldown (60 s), more than 5 codes in an hour, too many wrong guesses, or too many requests from the IP. Honour the `Retry-After` header (seconds). |
+| 502 | Firebase could not be reached; the token is not consumed, retry `confirm` |
+| 503 | the server has no email delivery configured |
+
+Limits: code valid 10 minutes; reset token valid 10 minutes; max 5 codes per email
+per hour. Codes are never stored in plain text.
+
+---
+
 ## 5. Rendering `payload.blocks`
 
 Each block is `{ block_id, type, text, data }`. Render by `type`; fall back

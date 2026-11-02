@@ -151,6 +151,29 @@ def enforce_rate_limit(request: Request, principal: Principal, session: Session)
         logger.exception("rate limiter error; allowing the request")
 
 
+def enforce_ip_rate_limit(request: Request, session: Session, per_minute: int) -> None:
+    """Throttle an unauthenticated action by client IP.
+
+    The authenticated limiter keys on the user; these actions have no user yet.
+    Like that one it fails open on a limiter error: the per-email cooldown and
+    attempt cap in the reset service are the controls that actually bound abuse.
+    """
+    ip = _client_ip(request)
+    if ip == "unknown":
+        return
+    try:
+        result = RateLimitRepository(session).check_minute(f"ip:{ip}", per_minute)
+    except Exception:
+        logger.exception("rate limiter error; allowing the request")
+        return
+    if not result.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="rate limit exceeded",
+            headers={"Retry-After": str(result.retry_after_seconds)},
+        )
+
+
 def require_admin(principal: Principal) -> None:
     if not principal.is_admin:
         raise HTTPException(status_code=403, detail="admin scope required")

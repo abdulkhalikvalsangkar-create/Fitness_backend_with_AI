@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from apps.api.actions import action_names, get_action
-from apps.api.security import Principal, authenticate, enforce_rate_limit
+from apps.api.security import Principal, authenticate, enforce_ip_rate_limit, enforce_rate_limit
 from packages.config import get_settings
 from packages.storage.db import ping, server_info, session_scope
 
@@ -56,6 +56,16 @@ MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 # Form fields that may carry a file part. `file`/`files` are the documented
 # names; `attachments`/`images` are accepted because the old client used them.
 _FILE_FIELDS = {"file", "files", "attachment", "attachments", "image", "images"}
+
+
+PASSWORD_RESET_ACTIONS = {
+    "auth.password_reset.request",
+    "auth.password_reset.resend",
+    "auth.password_reset.verify",
+    "auth.password_reset.confirm",
+}
+# Actions callable without a Bearer token.
+PUBLIC_ACTIONS = {"auth.firebase_exchange", "auth.refresh"} | PASSWORD_RESET_ACTIONS
 
 
 @app.middleware("http")
@@ -270,10 +280,14 @@ async def unified_endpoint(request: Request) -> JSONResponse:
         )
 
     with session_scope() as session:
-        if action_name in {"auth.firebase_exchange", "auth.refresh"}:
-            # These actions establish or renew a backend session and therefore
-            # must not require an access JWT first.
+        if action_name in PUBLIC_ACTIONS:
+            # These actions establish or renew a backend session, or recover a
+            # forgotten password, and therefore cannot require an access JWT.
             principal = Principal(user_id="", auth_method=action_name)
+            if action_name in PASSWORD_RESET_ACTIONS:
+                enforce_ip_rate_limit(
+                    request, session, settings.password_reset.ip_requests_per_minute
+                )
         else:
             principal = authenticate(request, body)
             enforce_rate_limit(request, principal, session)

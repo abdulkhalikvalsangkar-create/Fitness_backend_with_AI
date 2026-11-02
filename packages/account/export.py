@@ -14,10 +14,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import smtplib
 import tempfile
 from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import quote
@@ -27,6 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from packages.account.deletion import _safe_segment
+from packages.common import mailer
 from packages.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -210,30 +209,14 @@ def link_expiry() -> datetime:
 def send_link_email(to_address: str, url: str, expires_at: datetime) -> bool:
     """Email the link. Returns False (never raises) when SMTP is unconfigured
     or sending fails — the link in the job result is the source of truth."""
-    cfg = get_settings().export
-    if not (cfg.smtp_host and cfg.smtp_from and to_address):
-        return False
-
-    message = EmailMessage()
-    message["Subject"] = "Your health data export is ready"
-    message["From"] = cfg.smtp_from
-    message["To"] = to_address
-    message.set_content(
+    return mailer.send_email(
+        to_address,
+        "Your health data export is ready",
         "Your health data export is ready.\n\n"
         f"Download it here: {url}\n\n"
         f"This link expires on {expires_at:%Y-%m-%d %H:%M} UTC. "
-        "If you did not request this export, you can ignore this email."
+        "If you did not request this export, you can ignore this email.",
     )
-    try:
-        with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=15) as client:
-            client.starttls()
-            if cfg.smtp_user:
-                client.login(cfg.smtp_user, cfg.smtp_password)
-            client.send_message(message)
-        return True
-    except (OSError, smtplib.SMTPException) as exc:
-        logger.warning("export email to %s failed: %s", to_address, exc)
-        return False
 
 
 def purge_expired_files() -> int:

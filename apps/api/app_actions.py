@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from apps.api.actions import action
 from apps.api.security import Principal
 from packages.account.deletion import delete_user_data, remove_files
+from packages.auth.password_reset import PasswordResetService, ResetError
 from packages.config import get_settings
 from packages.domain.enums import JobType
 from packages.restaurant import places
@@ -35,6 +36,61 @@ logger = logging.getLogger(__name__)
 # How recently the user must have typed their password for account deletion.
 # The app re-authenticates immediately before calling, so this is generous.
 REAUTH_MAX_AGE_SECONDS = 300
+
+
+# --------------------------------------------------------------------------
+# forgot password (unauthenticated — see PUBLIC_ACTIONS in main.py)
+# --------------------------------------------------------------------------
+
+
+def _reset_failure(session: Session, exc: ResetError) -> HTTPException:
+    """Turn a reset failure into an HTTP error *without losing its side effects*.
+
+    The request session rolls back on any exception, which would silently undo
+    the wrong-attempt counter and let an attacker guess forever. Commit first.
+    """
+    session.commit()
+    headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+    return HTTPException(status_code=exc.status, detail=exc.message, headers=headers)
+
+
+@action("auth.password_reset.request")
+def handle_password_reset_request(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
+    """Email a 5-digit code. The response is identical whether or not the
+    address has an account."""
+    try:
+        result = PasswordResetService(session).request_code(body.get("email"))
+    except ResetError as exc:
+        raise _reset_failure(session, exc) from exc
+    return {"action": "auth.password_reset.request", **result}
+
+
+@action("auth.password_reset.resend")
+def handle_password_reset_resend(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
+    """Same as `request`: issues a fresh code and invalidates the previous one."""
+    result = handle_password_reset_request(body, principal, session)
+    result["action"] = "auth.password_reset.resend"
+    return result
+
+
+@action("auth.password_reset.verify")
+def handle_password_reset_verify(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
+    try:
+        result = PasswordResetService(session).verify_code(body.get("email"), body.get("otp"))
+    except ResetError as exc:
+        raise _reset_failure(session, exc) from exc
+    return {"action": "auth.password_reset.verify", **result}
+
+
+@action("auth.password_reset.confirm")
+def handle_password_reset_confirm(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
+    try:
+        result = PasswordResetService(session).reset_password(
+            body.get("reset_token"), body.get("new_password")
+        )
+    except ResetError as exc:
+        raise _reset_failure(session, exc) from exc
+    return {"action": "auth.password_reset.confirm", **result}
 
 
 # --------------------------------------------------------------------------

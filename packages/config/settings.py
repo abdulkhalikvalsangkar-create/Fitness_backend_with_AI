@@ -321,12 +321,33 @@ class ExportSettings:
     link_ttl_hours: int = field(default_factory=lambda: _env_int("EXPORT_LINK_TTL_HOURS", 24))
     # Public origin used to build download links, e.g. https://api.example.com
     public_base_url: str = field(default_factory=lambda: _env("PUBLIC_BASE_URL", ""))
-    # Optional: when set, the link is also emailed to the account address.
+
+
+@dataclass(frozen=True)
+class MailSettings:
+    """Outbound email (export links, password-reset codes)."""
+
     smtp_host: str = field(default_factory=lambda: _env("SMTP_HOST", ""))
     smtp_port: int = field(default_factory=lambda: _env_int("SMTP_PORT", 587))
     smtp_user: str = field(default_factory=lambda: _env("SMTP_USER", ""))
     smtp_password: str = field(default_factory=lambda: _env("SMTP_PASSWORD", ""))
     smtp_from: str = field(default_factory=lambda: _env("SMTP_FROM", ""))
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.smtp_host and self.smtp_from)
+
+
+@dataclass(frozen=True)
+class PasswordResetSettings:
+    """OTP-based password reset limits."""
+
+    otp_ttl_seconds: int = field(default_factory=lambda: _env_int("RESET_OTP_TTL_SECONDS", 600))
+    max_attempts: int = field(default_factory=lambda: _env_int("RESET_OTP_MAX_ATTEMPTS", 5))
+    resend_cooldown_seconds: int = field(default_factory=lambda: _env_int("RESET_RESEND_COOLDOWN_SECONDS", 60))
+    max_sends_per_hour: int = field(default_factory=lambda: _env_int("RESET_MAX_SENDS_PER_HOUR", 5))
+    token_ttl_seconds: int = field(default_factory=lambda: _env_int("RESET_TOKEN_TTL_SECONDS", 600))
+    ip_requests_per_minute: int = field(default_factory=lambda: _env_int("RESET_IP_PER_MIN", 10))
 
 
 @dataclass(frozen=True)
@@ -390,6 +411,8 @@ class Settings:
     security: SecuritySettings = field(default_factory=SecuritySettings)
     places: PlacesSettings = field(default_factory=PlacesSettings)
     export: ExportSettings = field(default_factory=ExportSettings)
+    mail: MailSettings = field(default_factory=MailSettings)
+    password_reset: PasswordResetSettings = field(default_factory=PasswordResetSettings)
 
     def validate(self) -> list[str]:
         """Return a list of configuration problems. Empty means good to go."""
