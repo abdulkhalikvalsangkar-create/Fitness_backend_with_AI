@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -96,9 +96,16 @@ async def request_context(request: Request, call_next):
 
 
 @app.get("/")
-async def status_endpoint() -> dict[str, Any]:
+async def status_endpoint(request: Request, export_token: Optional[str] = None) -> Any:
     """Unauthenticated status. Reports configuration health without leaking
-    values — a misconfigured deploy should be visible, not guessable."""
+    values — a misconfigured deploy should be visible, not guessable.
+
+    With `?export_token=...` it instead serves a health-data export: `/` is the
+    one path every host here routes to the app, so download links live on it.
+    """
+    if export_token:
+        return _serve_export(export_token, request)
+
     db_ok = ping()
     info = server_info() if db_ok else {}
     problems = settings.validate()
@@ -126,6 +133,16 @@ async def status_endpoint() -> dict[str, Any]:
 
 @app.get("/export/download")
 async def export_download(token: str, request: Request) -> Response:
+    """Same download as `GET /?export_token=...`, on its own path.
+
+    Some hosts route only `/` to the app (every other path gets the web
+    server's own HTML 500), which is why download links use the root form. This
+    route stays for hosts where other paths do work.
+    """
+    return _serve_export(token, request)
+
+
+def _serve_export(token: str, request: Request) -> Response:
     """Serve a health-data export through its signed, expiring link.
 
     The link itself is the credential (it is opened from an email, not the app),

@@ -78,8 +78,14 @@ def export_path(user_id: str, job_id: str, fmt: str = formats.DEFAULT_FORMAT) ->
 
 
 def download_url(token: str) -> str:
+    """Link to the root path, `/?export_token=...`.
+
+    `/` is the one path every host here routes to the app; a dedicated
+    `/export/download` path hits the web server's own HTML 500 on the current
+    cPanel host. The server still answers on both.
+    """
     base = get_settings().export.public_base_url.rstrip("/")
-    return f"{base}/export/download?token={quote(token)}"
+    return f"{base}/?export_token={quote(token)}"
 
 
 # -- data collection --------------------------------------------------------

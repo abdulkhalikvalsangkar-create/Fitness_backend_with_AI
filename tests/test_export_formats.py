@@ -378,3 +378,60 @@ class ExportJobTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RootDownloadTests(unittest.TestCase):
+    """Download links live on `/`, the only path the cPanel host routes to the app."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        patch = mock.patch.object(
+            export, "export_path",
+            lambda u, j, f="json": self.root / u / f"{j}.{formats.FORMATS[f].extension}",
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.client = TestClient(app, raise_server_exceptions=False)
+
+    def _token(self, fmt: str, hours: float = 1) -> str:
+        return export.sign_link("u1", "j1", datetime.now(timezone.utc) + timedelta(hours=hours), fmt)
+
+    def test_download_url_points_at_the_root_path(self) -> None:
+        url = export.download_url("abc.def")
+        self.assertIn("/?export_token=abc.def", url)
+        self.assertNotIn("/export/download", url)
+
+    def test_every_format_downloads_from_the_root_path(self) -> None:
+        for fmt in ("json", "csv") + (("pdf",) if formats.pdf_available() else ()):
+            export.write_export("u1", "j1", sample_data(), fmt)
+            response = self.client.get("/", params={"export_token": self._token(fmt)})
+            self.assertEqual(response.status_code, 200, fmt)
+            self.assertEqual(response.headers["content-type"], formats.FORMATS[fmt].media_type)
+            self.assertIn(formats.download_filename(formats.FORMATS[fmt]), response.headers["content-disposition"])
+
+    def test_the_url_the_job_hands_out_actually_works(self) -> None:
+        from urllib.parse import unquote
+
+        export.write_export("u1", "j1", sample_data(), "csv")
+        url = export.download_url(self._token("csv"))
+        query = unquote(url.split("export_token=")[1])
+        response = self.client.get("/", params={"export_token": query})
+        self.assertEqual(response.status_code, 200)
+
+    def test_bad_expired_and_missing_files_on_the_root_path(self) -> None:
+        self.assertEqual(self.client.get("/", params={"export_token": "abc"}).status_code, 404)
+        self.assertEqual(self.client.get("/", params={"export_token": self._token("json", -1)}).status_code, 410)
+        self.assertEqual(self.client.get("/", params={"export_token": self._token("csv")}).status_code, 404)
+
+    def test_root_without_a_token_is_still_the_status_endpoint(self) -> None:
+        with mock.patch("apps.api.main.ping", return_value=False):
+            response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("actions", response.json())
+
+    def test_old_path_still_works_where_the_host_allows_it(self) -> None:
+        export.write_export("u1", "j1", sample_data(), "json")
+        response = self.client.get("/export/download", params={"token": self._token("json")})
+        self.assertEqual(response.status_code, 200)

@@ -923,13 +923,16 @@ success:
 ```jsonc
 "result": { "stage": "done", "progress": 100,
             "format": "pdf", "filename": "health-data-export.pdf",
-            "download_url": "https://…/export/download?token=…",
+            "download_url": "https://…/?export_token=…",
             "expires_at": "2026-10-25T10:00:00+00:00", "size_bytes": 48211,
             "emailed": true }
 ```
 
 `download_url` is a signed link that expires after 24 h (`EXPORT_LINK_TTL_HOURS`).
-Opening it needs no Authorization header and downloads the file in the
+**Use it exactly as returned** — it is a plain `GET` on the root path with an
+`export_token` query parameter (the production host only routes `/` to the API;
+any other path returns the web server's HTML 500, so never rewrite it to
+`/export/download`). Opening it needs no Authorization header and downloads the file in the
 requested format (the response sets `Content-Type` and a
 `Content-Disposition: attachment; filename=…` header, so save it with that
 name). `emailed` is true only when the
