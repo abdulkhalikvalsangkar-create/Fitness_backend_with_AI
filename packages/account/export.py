@@ -24,6 +24,7 @@ import jwt
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from packages.account import formats
 from packages.account.deletion import _safe_segment
 from packages.common import mailer
 from packages.config import get_settings
@@ -39,19 +40,22 @@ ProgressFn = Callable[[str, int], None]
 # -- link signing -----------------------------------------------------------
 
 
-def sign_link(user_id: str, job_id: str, expires_at: datetime) -> str:
+def sign_link(user_id: str, job_id: str, expires_at: datetime, fmt: str = formats.DEFAULT_FORMAT) -> str:
     secret = get_settings().security.jwt_secret
     if not secret:
         raise RuntimeError("JWT_SECRET is not configured")
     return jwt.encode(
-        {"sub": user_id, "jid": job_id, "aud": EXPORT_AUDIENCE, "exp": expires_at},
+        {"sub": user_id, "jid": job_id, "fmt": fmt, "aud": EXPORT_AUDIENCE, "exp": expires_at},
         secret,
         algorithm=get_settings().security.jwt_algorithm,
     )
 
 
-def verify_link(token: str) -> tuple[str, str]:
-    """Returns (user_id, job_id) or raises jwt.InvalidTokenError (incl. expiry)."""
+def verify_link(token: str) -> tuple[str, str, str]:
+    """Returns (user_id, job_id, format) or raises jwt.InvalidTokenError (incl. expiry).
+
+    Links issued before formats existed carry no `fmt` and are JSON.
+    """
     settings = get_settings().security
     if not settings.jwt_secret:
         raise jwt.InvalidTokenError("export links are not configured")
@@ -62,11 +66,15 @@ def verify_link(token: str) -> tuple[str, str]:
         audience=EXPORT_AUDIENCE,
         options={"require": ["exp", "sub", "jid"]},
     )
-    return str(claims["sub"]), str(claims["jid"])
+    fmt = str(claims.get("fmt") or formats.DEFAULT_FORMAT)
+    if fmt not in formats.FORMATS:
+        raise jwt.InvalidTokenError("unknown export format")
+    return str(claims["sub"]), str(claims["jid"]), fmt
 
 
-def export_path(user_id: str, job_id: str) -> Path:
-    return Path(get_settings().export.dir) / _safe_segment(user_id) / f"{_safe_segment(job_id)}.json"
+def export_path(user_id: str, job_id: str, fmt: str = formats.DEFAULT_FORMAT) -> Path:
+    extension = formats.FORMATS[fmt].extension
+    return Path(get_settings().export.dir) / _safe_segment(user_id) / f"{_safe_segment(job_id)}.{extension}"
 
 
 def download_url(token: str) -> str:
@@ -175,20 +183,21 @@ def _decode_json_columns(value: Any) -> None:
                     pass
 
 
-def write_export(user_id: str, job_id: str, data: dict[str, Any]) -> Path:
-    """Write atomically so a download never serves a half-written file."""
+def write_export(user_id: str, job_id: str, data: dict[str, Any], fmt: str = formats.DEFAULT_FORMAT) -> Path:
+    """Render and write atomically so a download never serves a half-written file."""
     document = {
         "export_version": EXPORT_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "user_id": user_id,
         "data": data,
     }
-    path = export_path(user_id, job_id)
+    content = formats.render(formats.get_format(fmt), data, document)
+    path = export_path(user_id, job_id, fmt)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(document, handle, default=str, ensure_ascii=False)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
         os.replace(tmp_name, path)
     except BaseException:
         try:
@@ -227,7 +236,7 @@ def purge_expired_files() -> int:
         return 0
     cutoff = datetime.now(timezone.utc).timestamp() - get_settings().export.link_ttl_hours * 3600
     removed = 0
-    for path in root.glob("*/*.json"):
+    for path in root.glob("*/*"):
         try:
             if path.stat().st_mtime < cutoff:
                 path.unlink()

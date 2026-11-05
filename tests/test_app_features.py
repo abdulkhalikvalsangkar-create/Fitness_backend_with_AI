@@ -21,7 +21,7 @@ from fastapi import HTTPException
 
 from apps.api import app_actions
 from apps.api.security import Principal
-from packages.account import export
+from packages.account import export, formats
 from packages.domain.auth import FirebaseIdentity
 from packages.domain.enums import HazardLevel, Severity, Verdict
 from packages.domain.models import (
@@ -227,7 +227,7 @@ class ReminderActionTests(unittest.TestCase):
 class ExportLinkTests(unittest.TestCase):
     def test_round_trip(self) -> None:
         token = export.sign_link("u1", "job1", datetime.now(timezone.utc) + timedelta(hours=1))
-        self.assertEqual(export.verify_link(token), ("u1", "job1"))
+        self.assertEqual(export.verify_link(token), ("u1", "job1", "json"))
 
     def test_expired_link_is_rejected(self) -> None:
         token = export.sign_link("u1", "job1", datetime.now(timezone.utc) - timedelta(seconds=5))
@@ -257,7 +257,7 @@ class ExportLinkTests(unittest.TestCase):
         from pathlib import Path
 
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.object(export, "export_path", lambda u, j: Path(tmp) / u / f"{j}.json"):
+            with mock.patch.object(export, "export_path", lambda u, j, f="json": Path(tmp) / u / f"{j}.{f}"):
                 path = export.write_export("u1", "j1", {"profile": {"display_name": "A"}})
             document = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(document["data"]["profile"]["display_name"], "A")
@@ -409,3 +409,76 @@ class ActionRegistrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExportDownloadEndpointTests(unittest.TestCase):
+    """GET /export/download, through the real app."""
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from fastapi.testclient import TestClient
+
+        from apps.api.main import app
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        patch = mock.patch.object(export, "export_path", lambda u, j, f="json": root / u / f"{j}.{formats.FORMATS[f].extension}")
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.root = root
+        self.client = TestClient(app, raise_server_exceptions=False)
+
+    def _link(self, user: str = "u1", job: str = "job1", hours: float = 1) -> str:
+        return export.sign_link(user, job, datetime.now(timezone.utc) + timedelta(hours=hours))
+
+    def test_valid_link_downloads_the_file_as_an_attachment(self) -> None:
+        export.write_export("u1", "job1", {"profile": {"display_name": "A"}})
+        response = self.client.get("/export/download", params={"token": self._link()})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "application/json")
+        self.assertIn("attachment", response.headers["content-disposition"])
+        self.assertEqual(response.json()["data"]["profile"]["display_name"], "A")
+
+    def test_missing_file_is_404_not_500(self) -> None:
+        response = self.client.get("/export/download", params={"token": self._link(job="nofile")})
+        self.assertEqual(response.status_code, 404)
+
+    def test_unreadable_file_reports_a_specific_500(self) -> None:
+        from pathlib import Path
+
+        export.write_export("u1", "job1", {})
+        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")):
+            response = self.client.get("/export/download", params={"token": self._link()})
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["error"], "the export file could not be read")
+
+    def test_expired_and_garbage_links(self) -> None:
+        self.assertEqual(
+            self.client.get("/export/download", params={"token": self._link(hours=-1)}).status_code, 410
+        )
+        self.assertEqual(self.client.get("/export/download", params={"token": "garbage"}).status_code, 404)
+        self.assertEqual(self.client.get("/export/download").status_code, 422)
+
+    def test_download_works_through_the_wsgi_bridge_passenger_uses(self) -> None:
+        import io
+        import sys
+
+        from a2wsgi import ASGIMiddleware
+
+        from apps.api.main import app
+
+        export.write_export("u1", "job1", {"profile": {}})
+        environ = {
+            "REQUEST_METHOD": "GET", "SCRIPT_NAME": "", "PATH_INFO": "/export/download",
+            "QUERY_STRING": "token=" + self._link(), "SERVER_NAME": "x", "SERVER_PORT": "443",
+            "wsgi.url_scheme": "https", "wsgi.input": io.BytesIO(b""), "wsgi.errors": sys.stderr,
+            "wsgi.version": (1, 0), "wsgi.multithread": False, "wsgi.multiprocess": True,
+            "wsgi.run_once": False, "SERVER_PROTOCOL": "HTTP/1.1", "HTTP_HOST": "x",
+        }
+        seen: dict = {}
+        body = b"".join(ASGIMiddleware(app)(environ, lambda status, headers, exc=None: seen.update(status=status)))
+        self.assertTrue(seen["status"].startswith("200"))
+        self.assertIn(b"export_version", body)

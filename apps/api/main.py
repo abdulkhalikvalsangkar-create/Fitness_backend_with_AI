@@ -15,7 +15,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from apps.api.actions import action_names, get_action
 from apps.api.security import Principal, authenticate, enforce_ip_rate_limit, enforce_rate_limit
@@ -125,32 +125,49 @@ async def status_endpoint() -> dict[str, Any]:
 
 
 @app.get("/export/download")
-async def export_download(token: str) -> FileResponse:
+async def export_download(token: str, request: Request) -> Response:
     """Serve a health-data export through its signed, expiring link.
 
     The link itself is the credential (it is opened from an email, not the app),
     so it is signed with a dedicated audience and expires; nothing else here
     identifies the caller.
+
+    The file is read into memory and returned as a plain Response rather than a
+    streamed FileResponse: exports are small, and streaming a file through the
+    ASGI-to-WSGI bridge Passenger uses adds failure modes for no benefit.
     """
     import jwt
 
-    from packages.account import export
+    from packages.account import export, formats
 
+    request_id = getattr(request.state, "request_id", "")
     try:
-        user_id, job_id = export.verify_link(token)
+        user_id, job_id, fmt = export.verify_link(token)
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=410, detail="this download link has expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=404, detail="not found")
 
-    path = export.export_path(user_id, job_id)
-    if not path.is_file():
+    export_format = formats.FORMATS[fmt]
+    path = export.export_path(user_id, job_id, fmt)
+    try:
+        content = path.read_bytes()
+    except FileNotFoundError:
+        # The job succeeded but this process cannot see its file: the worker
+        # and the web app are not sharing EXPORT_DIR, or the file was purged.
+        logger.error("export file missing [%s]: %s", request_id, path)
         raise HTTPException(status_code=404, detail="not found")
-    return FileResponse(
-        path,
-        media_type="application/json",
-        filename="health-data-export.json",
-        headers={"Cache-Control": "no-store"},
+    except OSError as exc:
+        logger.error("export file unreadable [%s]: %s: %s", request_id, path, exc)
+        raise HTTPException(status_code=500, detail="the export file could not be read")
+
+    return Response(
+        content=content,
+        media_type=export_format.media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{formats.download_filename(export_format)}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 

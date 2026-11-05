@@ -900,28 +900,39 @@ until it expires (≤15 min), so make no further calls with it.
 ### 4.12 `export.request` — ✅ export all health data
 
 ```jsonc
-{ "action": "export.request" }
+{ "action": "export.request", "format": "pdf" }     // "json" (default) | "csv" | "pdf"
 ```
 ```jsonc
-{ "action": "export.request", "job_id": "...", "status": "queued", "poll_action": "job_status" }
+{ "action": "export.request", "job_id": "...", "status": "queued", "format": "pdf", "poll_action": "job_status" }
 ```
 
-Poll `{ "action": "job_status", "job_id": "..." }`. `job.status` goes
+| `format` | file you get | contents |
+|---|---|---|
+| `csv` | `health-data-export.zip` — one CSV per section (`profile.csv`, `metrics.csv`, `nutrition.csv`, `activities.csv`, `medical.csv`, `memories.csv`, `reminders.csv`, `chat_history.csv`, …) plus `README.txt`. Sections with no data are left out. UTF-8; opens in Excel, Numbers and Google Sheets. | **Everything** |
+| `pdf` | `health-data-export.pdf` — a readable summary report: profile, latest value and 30-day average per metric, last 30 days of nutrition, last 30 activities, latest medical report, saved facts, reminders. | A **summary**: no chat history or attachment list. Non-Latin characters (e.g. Hindi) print as `?` — use CSV/JSON for the original text. |
+| `json` | `health-data-export.json` | **Everything**, machine-readable |
+
+An unknown `format` is a `400`. `pdf` returns `503 PDF export is not available
+on this server` if the server lacks the PDF library. A user can have one fresh
+export per format; asking again for the same format within 24 h returns that
+job. Poll `{ "action": "job_status", "job_id": "..." }`. `job.status` goes
 `queued → running → succeeded | failed`. While `running`,
 `job.result = { "stage": "reading metrics", "progress": 40 }` (0–100). On
 success:
 
 ```jsonc
 "result": { "stage": "done", "progress": 100,
+            "format": "pdf", "filename": "health-data-export.pdf",
             "download_url": "https://…/export/download?token=…",
             "expires_at": "2026-10-25T10:00:00+00:00", "size_bytes": 48211,
             "emailed": true }
 ```
 
 `download_url` is a signed link that expires after 24 h (`EXPORT_LINK_TTL_HOURS`).
-Opening it needs no Authorization header and downloads one JSON file (profile
-incl. date of birth, metrics, nutrition, activities, medical, memories,
-reminders, chat history, attachment list). `emailed` is true only when the
+Opening it needs no Authorization header and downloads the file in the
+requested format (the response sets `Content-Type` and a
+`Content-Disposition: attachment; filename=…` header, so save it with that
+name). `emailed` is true only when the
 server has SMTP configured — **do not promise an email unless the deployment
 has it**; `download_url` is always present. Requesting again within 24 h
 returns the same job rather than starting another. An expired link returns 410.

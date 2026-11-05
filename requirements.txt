@@ -21,6 +21,9 @@ python-dotenv>=1.0
 PyJWT>=2.8
 firebase-admin>=6.5
 
+fpdf2>=2.7                       # PDF health-data export (pure Python; imported lazily,
+                                 # so a deploy without it only loses format=pdf)
+
 numpy>=1.26                      # cosine similarity over the embedding blobs
 openpyxl>=3.1                    # scripts/import_faq.py reads the predefined-FAQ .xlsx
 

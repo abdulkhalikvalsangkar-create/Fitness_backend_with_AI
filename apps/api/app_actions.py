@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.actions import action
 from apps.api.security import Principal
+from packages.account import formats
 from packages.account.deletion import delete_user_data, remove_files
 from packages.auth.password_reset import PasswordResetService, ResetError
 from packages.config import get_settings
@@ -164,8 +165,17 @@ def handle_export_request(body: dict, principal: Principal, session: Session) ->
     carries `{stage, progress}`; on success it carries `download_url`,
     `expires_at`, `size_bytes` and `emailed`.
     """
+    try:
+        export_format = formats.get_format(body.get("format"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if export_format.name == "pdf" and not formats.pdf_available():
+        raise HTTPException(status_code=503, detail="PDF export is not available on this server")
+
     UserRepository(session).upsert(principal.user_id, locale=body.get("locale") or "en")
 
+    # Rejoin an export of the same format that is still fresh. Jobs created
+    # before formats existed have no `format` in their payload and are JSON.
     ttl_hours = get_settings().export.link_ttl_hours
     existing = session.execute(
         sql_text(
@@ -173,16 +183,22 @@ def handle_export_request(body: dict, principal: Principal, session: Session) ->
             "WHERE user_id = :uid AND job_type = :jt "
             "  AND status IN ('queued', 'running', 'succeeded') "
             "  AND created_at > UTC_TIMESTAMP(3) - INTERVAL :hrs HOUR "
+            "  AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.format')), 'json') = :fmt "
             "ORDER BY created_at DESC LIMIT 1"
         ),
-        {"uid": principal.user_id, "jt": JobType.DATA_EXPORT.value, "hrs": ttl_hours},
+        {
+            "uid": principal.user_id,
+            "jt": JobType.DATA_EXPORT.value,
+            "hrs": ttl_hours,
+            "fmt": export_format.name,
+        },
     ).first()
     if existing:
         job_id, status = existing[0], existing[1]
     else:
         job_id = JobRepository(session).enqueue(
             job_type=JobType.DATA_EXPORT,
-            payload={},
+            payload={"format": export_format.name},
             user_id=principal.user_id,
             priority=150,
         )
@@ -192,6 +208,7 @@ def handle_export_request(body: dict, principal: Principal, session: Session) ->
         "action": "export.request",
         "job_id": job_id,
         "status": status,
+        "format": export_format.name,
         "poll_action": "job_status",
     }
 

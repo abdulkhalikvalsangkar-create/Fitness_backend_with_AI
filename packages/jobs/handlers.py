@@ -519,12 +519,17 @@ def export_user_data(ctx: JobContext) -> dict[str, Any]:
         except Exception:
             logger.exception("could not record export progress")
 
+    from packages.account import formats
+
+    # Validated again here: the payload is caller-supplied through job_enqueue.
+    fmt = formats.get_format(ctx.payload.get("format")).name
+
     data = export.collect(ctx.session, user_id, progress)
-    progress("writing file", 98)
-    path = export.write_export(user_id, ctx.job_id, data)
+    progress("building PDF" if fmt == "pdf" else "writing file", 98)
+    path = export.write_export(user_id, ctx.job_id, data, fmt)
 
     expires_at = export.link_expiry()
-    url = export.download_url(export.sign_link(user_id, ctx.job_id, expires_at))
+    url = export.download_url(export.sign_link(user_id, ctx.job_id, expires_at, fmt))
 
     email_row = ctx.session.execute(
         text("SELECT email FROM app_user WHERE user_id = :uid"), {"uid": user_id}
@@ -534,6 +539,8 @@ def export_user_data(ctx: JobContext) -> dict[str, Any]:
     return {
         "stage": "done",
         "progress": 100,
+        "format": fmt,
+        "filename": formats.download_filename(formats.FORMATS[fmt]),
         "download_url": url,
         "expires_at": expires_at.isoformat(),
         "size_bytes": path.stat().st_size,
