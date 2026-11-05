@@ -912,6 +912,8 @@ until it expires (≤15 min), so make no further calls with it.
 | `pdf` | `health-data-export.pdf` — a readable summary report: profile, latest value and 30-day average per metric, last 30 days of nutrition, last 30 activities, latest medical report, saved facts, reminders. | A **summary**: no chat history or attachment list. Non-Latin characters (e.g. Hindi) print as `?` — use CSV/JSON for the original text. |
 | `json` | `health-data-export.json` | **Everything**, machine-readable |
 
+Add `"force": true` to always start a **new** export instead of reusing a recent
+one (use it for a "Regenerate" button, or to retry after a failed download).
 An unknown `format` is a `400`. `pdf` returns `503 PDF export is not available
 on this server` if the server lacks the PDF library. A user can have one fresh
 export per format; asking again for the same format within 24 h returns that

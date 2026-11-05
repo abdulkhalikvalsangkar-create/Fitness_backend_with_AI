@@ -435,3 +435,42 @@ class RootDownloadTests(unittest.TestCase):
         export.write_export("u1", "j1", sample_data(), "json")
         response = self.client.get("/export/download", params={"token": self._token("json")})
         self.assertEqual(response.status_code, 200)
+
+
+class ExportRejoinTests(unittest.TestCase):
+    """Reusing an earlier export must never hand back a link this host cannot serve."""
+
+    PRINCIPAL = Principal(user_id="u1")
+
+    def _call(self, body: dict, existing=None):
+        session = mock.Mock()
+        session.execute.return_value.first.return_value = existing
+        with mock.patch.object(app_actions, "UserRepository"), mock.patch.object(
+            app_actions, "JobRepository"
+        ) as jobs:
+            jobs.return_value.enqueue.return_value = "new-job"
+            result = app_actions.handle_export_request(body, self.PRINCIPAL, session)
+        return result, session, jobs.return_value.enqueue
+
+    def test_finished_jobs_are_only_reused_if_their_link_is_the_current_form(self) -> None:
+        _, session, _ = self._call({"format": "csv"})
+        sql = str(session.execute.call_args.args[0])
+        self.assertIn("result LIKE '%export_token=%'", sql)
+        self.assertIn("status <> 'succeeded'", sql)
+
+    def test_a_usable_earlier_job_is_rejoined(self) -> None:
+        result, _, enqueue = self._call({"format": "csv"}, existing=("old-job", "succeeded"))
+        self.assertEqual(result["job_id"], "old-job")
+        enqueue.assert_not_called()
+
+    def test_force_always_starts_a_new_export(self) -> None:
+        for flag in (True, "true", 1):
+            result, session, enqueue = self._call({"format": "csv", "force": flag}, existing=("old-job", "succeeded"))
+            self.assertEqual(result["job_id"], "new-job")
+            self.assertEqual(result["status"], "queued")
+            session.execute.assert_not_called()
+            enqueue.assert_called_once()
+
+    def test_force_false_does_not_skip_the_rejoin(self) -> None:
+        result, _, _ = self._call({"format": "json", "force": False}, existing=("old-job", "running"))
+        self.assertEqual(result["job_id"], "old-job")

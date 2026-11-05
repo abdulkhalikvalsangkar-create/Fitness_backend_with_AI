@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 
-from apps.api.actions import action
+from apps.api.actions import _parse_bool, action
 from apps.api.security import Principal
 from packages.account import formats
 from packages.account.deletion import delete_user_data, remove_files
@@ -174,25 +174,31 @@ def handle_export_request(body: dict, principal: Principal, session: Session) ->
 
     UserRepository(session).upsert(principal.user_id, locale=body.get("locale") or "en")
 
-    # Rejoin an export of the same format that is still fresh. Jobs created
-    # before formats existed have no `format` in their payload and are JSON.
-    ttl_hours = get_settings().export.link_ttl_hours
-    existing = session.execute(
-        sql_text(
-            "SELECT job_id, status FROM job "
-            "WHERE user_id = :uid AND job_type = :jt "
-            "  AND status IN ('queued', 'running', 'succeeded') "
-            "  AND created_at > UTC_TIMESTAMP(3) - INTERVAL :hrs HOUR "
-            "  AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.format')), 'json') = :fmt "
-            "ORDER BY created_at DESC LIMIT 1"
-        ),
-        {
-            "uid": principal.user_id,
-            "jt": JobType.DATA_EXPORT.value,
-            "hrs": ttl_hours,
-            "fmt": export_format.name,
-        },
-    ).first()
+    # Rejoin an export of the same format that is still fresh, unless the caller
+    # asks for a new one (`force`). Jobs created before formats existed have no
+    # `format` in their payload and are JSON. A finished job is only reused if
+    # its link is the current root-path form (`?export_token=`): earlier builds
+    # stored `/export/download?token=` links, which this host cannot serve, and
+    # reusing one would hand the app a link that always fails.
+    existing = None
+    if not _parse_bool(body.get("force")):
+        existing = session.execute(
+            sql_text(
+                "SELECT job_id, status FROM job "
+                "WHERE user_id = :uid AND job_type = :jt "
+                "  AND status IN ('queued', 'running', 'succeeded') "
+                "  AND created_at > UTC_TIMESTAMP(3) - INTERVAL :hrs HOUR "
+                "  AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.format')), 'json') = :fmt "
+                "  AND (status <> 'succeeded' OR result LIKE '%export_token=%') "
+                "ORDER BY created_at DESC LIMIT 1"
+            ),
+            {
+                "uid": principal.user_id,
+                "jt": JobType.DATA_EXPORT.value,
+                "hrs": get_settings().export.link_ttl_hours,
+                "fmt": export_format.name,
+            },
+        ).first()
     if existing:
         job_id, status = existing[0], existing[1]
     else:
