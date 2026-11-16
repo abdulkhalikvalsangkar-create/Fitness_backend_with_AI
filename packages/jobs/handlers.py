@@ -54,8 +54,9 @@ def rerun_product_scan(ctx: JobContext) -> dict[str, Any]:
 
     user_id = str(ctx.payload.get("user_id") or ctx.user_id or "")
     attachment_ids = ctx.payload.get("attachment_ids") or []
-    if not user_id or not attachment_ids:
-        raise ValueError("product_scan requires user_id and attachment_ids")
+    barcode = ctx.payload.get("barcode")
+    if not user_id or not (attachment_ids or barcode):
+        raise ValueError("product_scan requires user_id and attachment_ids or a barcode")
 
     store = BlobStore(ctx.session)
     images: list[bytes] = []
@@ -78,6 +79,9 @@ def rerun_product_scan(ctx: JobContext) -> dict[str, Any]:
         attachment_ids=attachment_ids,
         scan_id=ctx.payload.get("scan_id"),
         enqueue_research=False,
+        label_scan=bool(ctx.payload.get("label_scan")),
+        hint=ctx.payload.get("hint") if isinstance(ctx.payload.get("hint"), dict) else None,
+        barcode=barcode if isinstance(barcode, str) and not images else None,
     )
     from packages.orchestrator.templates import product_blocks
     from packages.product.summary import product_summary

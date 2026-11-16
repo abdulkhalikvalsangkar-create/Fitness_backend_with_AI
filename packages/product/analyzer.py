@@ -101,16 +101,34 @@ class ProductAnalyzer:
         attachment_ids: Optional[list[str]] = None,
         scan_id: Optional[str] = None,
         enqueue_research: bool = True,
+        label_scan: bool = False,
+        hint: Optional[dict[str, Any]] = None,
+        barcode: Optional[str] = None,
     ) -> tuple[ProductAnalysis, AnalysisTrace]:
+        """`barcode` analyses a known product with no photo at all — the user
+        picked it from search. Ignored when images are supplied.
+
+        `label_scan` is the user photographing a label *on purpose* — the
+        follow-up to a "product not found" answer. Only then is OCR allowed on
+        a photo whose barcode was read but is in no database. `hint` carries
+        what the user typed (barcode, product_name, brand) for that product.
+        """
         trace = AnalysisTrace()
         analysis = ProductAnalysis()
 
-        if not images:
+        barcode = barcode if isinstance(barcode, str) and _BARCODE_RE.match(barcode.strip()) else None
+        if barcode:
+            barcode = barcode.strip()
+        if not images and not barcode:
             analysis.unidentified_reason = ProductUnidentifiedReason.UNREADABLE
             trace.notes.append("no images supplied")
             return analysis, trace
 
-        identity, ingredients_text, resolved_class = self._identify(images, trace, product_class)
+        identity, ingredients_text, resolved_class = self._identify(
+            images, trace, product_class, label_scan=label_scan, barcode=barcode
+        )
+        if label_scan:
+            identity = _apply_hint(identity, hint)
         analysis.identity = identity
         analysis.identified_via = trace.identified_via
 
@@ -157,6 +175,9 @@ class ProductAnalyzer:
                 context=context,
                 scan_id=scan_id,
                 product_class=resolved_class,
+                label_scan=label_scan,
+                hint=hint,
+                barcode=None if images else barcode,
             )
 
         from packages.config import get_settings
@@ -171,22 +192,37 @@ class ProductAnalyzer:
         images: list[bytes],
         trace: AnalysisTrace,
         product_class: Optional[str],
+        label_scan: bool = False,
+        barcode: Optional[str] = None,
     ) -> tuple[Optional[ProductIdentity], str, str]:
         """Returns (identity, ingredients_text, product_class).
 
-        Ingredient text in order of trust: the product database, then the label
-        OCR. Falling through to OCR is what makes an unlisted barcode
-        recoverable — the panel is nearly always in the same photo, and
-        the old `app.py` used to discard it the moment a barcode was found.
+        Ingredient text in order of trust: the product database, then — only
+        when no barcode was read, or the user is deliberately photographing a
+        label (`label_scan`) — the label OCR.
+
+        A decoded barcode that no database knows does NOT fall through to OCR.
+        The photo is usually just the barcode, and OCR on it returns digits and
+        stray glyphs that used to be analysed as if they were an ingredient
+        list. The caller answers "product not found" and asks for a label photo.
         """
         resolved_class = product_class or DEFAULT_PRODUCT_CLASS
 
-        # 1. barcode
+        # 1. barcode — decoded from the photo, or given directly when the user
+        #    picked a product from search and there is no photo at all.
         started = time.perf_counter()
-        scan = barcode_mod.scan(images)
+        if images:
+            scan = barcode_mod.scan(images)
+        elif barcode:
+            digits = barcode_mod.normalise_payload(barcode)
+            scan = barcode_mod.BarcodeResult(
+                barcode=digits, gtin14=barcode_mod.to_gtin14(digits), symbology="lookup", confidence=1.0
+            )
+        else:
+            scan = barcode_mod.BarcodeResult()
         trace.barcode_ms = round((time.perf_counter() - started) * 1000, 2)
 
-        if not barcode_mod.backend_available():
+        if images and not barcode_mod.backend_available():
             trace.notes.append(f"barcode backend unavailable: {barcode_mod.backend_error()}")
 
         identity: Optional[ProductIdentity] = None
@@ -256,8 +292,11 @@ class ProductAnalyzer:
         elif scan.saw_non_retail_symbol:
             trace.notes.append(f"non-retail symbol(s): {', '.join(scan.rejected_symbols)}")
 
-        # 3. OCR fallback — always, when the database gave us no panel
-        if not ingredients_text.strip():
+        # 3. OCR — when the database gave us no panel, unless a barcode was read
+        #    (see above). No barcode (a label photo) and label_scan both read it.
+        if not ingredients_text.strip() and scan.found and not label_scan:
+            trace.notes.append("barcode read but product has no ingredient list on record; OCR skipped")
+        elif not ingredients_text.strip():
             started = time.perf_counter()
             results = self.ocr.read_many(images)
             trace.ocr_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -337,6 +376,9 @@ class ProductAnalyzer:
         context: Optional[UserContext],
         scan_id: Optional[str],
         product_class: str,
+        label_scan: bool = False,
+        hint: Optional[dict[str, Any]] = None,
+        barcode: Optional[str] = None,
     ) -> list[str]:
         job_ids: list[str] = []
         for ingredient in _research_priority(unresolved)[:10]:
@@ -367,6 +409,9 @@ class ProductAnalyzer:
                 "jurisdiction": self.jurisdiction,
                 "product_class": product_class,
                 "scan_id": scan_id,
+                "label_scan": label_scan,
+                "hint": hint if label_scan else None,
+                "barcode": barcode,
                 "context": context.model_dump(mode="json") if context else None,
             },
             user_id=self.user_id,
@@ -375,6 +420,47 @@ class ProductAnalyzer:
         for child_id in job_ids:
             self.jobs.add_dependency(parent_id, child_id)
         return [parent_id]
+
+
+_BARCODE_RE = re.compile(r"^\d{6,14}$")
+
+
+def _apply_hint(
+    identity: Optional[ProductIdentity], hint: Optional[dict[str, Any]]
+) -> Optional[ProductIdentity]:
+    """Fold what the user typed into the identity of a label scan.
+
+    Only fills gaps — a barcode or name that a database supplied wins over the
+    user's text — and re-validates, because the same hint also arrives through
+    a job payload that a caller can write.
+    """
+    if not isinstance(hint, dict):
+        return identity
+
+    values: dict[str, str] = {}
+    for key, limit in (("barcode", 32), ("product_name", 255), ("brand", 191)):
+        raw = hint.get(key)
+        if isinstance(raw, str) and raw.strip():
+            values[key] = raw.strip()[:limit]
+    if "barcode" in values and not _BARCODE_RE.match(values["barcode"]):
+        del values["barcode"]
+    if not values:
+        return identity
+
+    if identity is None:
+        return ProductIdentity(
+            barcode=values.get("barcode"),
+            name=values.get("product_name"),
+            brand=values.get("brand"),
+            source="user",
+        )
+    return identity.model_copy(
+        update={
+            "barcode": identity.barcode or values.get("barcode"),
+            "name": identity.name or values.get("product_name"),
+            "brand": identity.brand or values.get("brand"),
+        }
+    )
 
 
 # Ingredient panels are ordered by weight, so the first entries are bulk

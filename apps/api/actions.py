@@ -733,6 +733,26 @@ def handle_scan(body: dict, principal: Principal, session: Session) -> dict[str,
     if scan_type == "restaurant" and body.get("place_id"):
         client_hints = {**client_hints, "place_id": str(body["place_id"])[:256]}
 
+    # `label_scan` is the follow-up to a "product not found" answer: the user is
+    # photographing the label on purpose, so OCR is allowed even though the
+    # photo may also show a barcode. What they typed rides along as a hint.
+    if scan_type == "product" and _parse_bool(body.get("label_scan")):
+        hint: dict[str, str] = {}
+        for key, limit in (("barcode", 32), ("product_name", 255), ("brand", 191)):
+            raw = body.get(key)
+            if isinstance(raw, str) and raw.strip():
+                hint[key] = raw.strip()[:limit]
+        if "barcode" in hint and not (hint["barcode"].isdigit() and 6 <= len(hint["barcode"]) <= 14):
+            raise HTTPException(status_code=400, detail="barcode must be 6 to 14 digits")
+        client_hints = {**client_hints, "label_scan": True, "hint": hint}
+    elif scan_type == "product" and not body.get("attachments") and body.get("barcode") is not None:
+        # No photo, just a barcode — the user picked a product from
+        # `product.search`. Analyse it straight from the product databases.
+        barcode = str(body["barcode"]).strip()
+        if not (barcode.isdigit() and 6 <= len(barcode) <= 14):
+            raise HTTPException(status_code=400, detail="barcode must be 6 to 14 digits")
+        client_hints = {**client_hints, "barcode_lookup": barcode}
+
     result = handle_chat(
         {
             **body,
@@ -758,6 +778,7 @@ def handle_scan(body: dict, principal: Principal, session: Session) -> dict[str,
         if isinstance(block, dict) and block.get("block_id") == "verdict_1":
             verdict_data = block.get("data") or {}
             break
+    result["product_found"] = verdict_data is not None
     if verdict_data:
         result["verdict"] = verdict_data.get("verdict")
         result["reason"] = verdict_data.get("reason")
@@ -775,6 +796,10 @@ def handle_scan(body: dict, principal: Principal, session: Session) -> dict[str,
             ):
                 result["verdict"] = "unidentified"
                 result["reason"] = str(block["data"].get("reason") or "unidentified")
+                # What the app should offer next: for a barcode no database
+                # knows, "photograph_ingredient_panel" — send the label back with
+                # label_scan=true.
+                result["next_action"] = block["data"].get("action")
                 break
     return result
 

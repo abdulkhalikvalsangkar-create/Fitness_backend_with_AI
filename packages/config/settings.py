@@ -383,7 +383,7 @@ class SecuritySettings:
                 "FETCH_ALLOWLIST",
                 "world.openfoodfacts.org,world.openbeautyfacts.org,world.openproductsfacts.org,"
                 "pubchem.ncbi.nlm.nih.gov,eutils.ncbi.nlm.nih.gov,www.ebi.ac.uk,api.crossref.org,"
-                "api.openalex.org,api.semanticscholar.org,places.googleapis.com",
+                "api.openalex.org,api.semanticscholar.org,places.googleapis.com,search.openfoodfacts.org",
             )
         )
     )

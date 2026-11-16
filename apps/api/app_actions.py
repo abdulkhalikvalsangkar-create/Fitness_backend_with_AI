@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import HTTPException
 from sqlalchemy import text as sql_text
@@ -22,8 +22,10 @@ from packages.account.deletion import delete_user_data, remove_files
 from packages.auth.password_reset import PasswordResetService, ResetError
 from packages.config import get_settings
 from packages.domain.enums import JobType
+from packages.connectors.openfacts import OpenFactsConnector
 from packages.restaurant import places
 from packages.storage.repositories.jobs import JobRepository
+from packages.storage.repositories.products import ProductRepository
 from packages.storage.repositories.reminders import (
     CATEGORIES,
     ReminderError,
@@ -216,6 +218,113 @@ def handle_export_request(body: dict, principal: Principal, session: Session) ->
         "status": status,
         "format": export_format.name,
         "poll_action": "job_status",
+    }
+
+
+# --------------------------------------------------------------------------
+# product search
+# --------------------------------------------------------------------------
+
+_PRODUCT_TYPES = {"food": ["off"], "cosmetic": ["obf"]}
+
+
+def _product_result(
+    *,
+    barcode: str,
+    name: str,
+    brand: Any,
+    quantity: Any,
+    image_url: Any,
+    category: Any,
+    product_class: Any,
+    source: str,
+    has_ingredients: Optional[bool],
+) -> dict[str, Any]:
+    return {
+        "barcode": barcode,
+        "name": name,
+        "brand": brand or None,
+        "quantity": quantity or None,
+        "image_url": image_url or None,
+        "category": category or None,
+        "product_class": product_class or None,
+        "source": source,
+        "has_ingredients": has_ingredients,
+    }
+
+
+@action("product.search")
+def handle_product_search(body: dict, principal: Principal, session: Session) -> dict[str, Any]:
+    """Find a product by name. Products we already know come first, then Open
+    Food Facts / Open Beauty Facts. To analyse a result, call `scan` with its
+    `barcode` and no photo."""
+    from packages.product import barcode as barcode_mod
+
+    query = " ".join(str(body.get("query") or "").split())
+    if len(query) < 2:
+        raise HTTPException(status_code=400, detail="query must be at least 2 characters")
+    if len(query) > 100:
+        raise HTTPException(status_code=400, detail="query must be at most 100 characters")
+
+    try:
+        limit = max(1, min(20, int(body.get("limit") or 10)))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="limit must be an integer") from exc
+
+    product_type = body.get("product_type")
+    if product_type is not None and str(product_type).lower() not in _PRODUCT_TYPES:
+        raise HTTPException(status_code=400, detail="product_type must be 'food' or 'cosmetic'")
+    product_type = str(product_type).lower() if product_type else None
+
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(item: dict[str, Any]) -> None:
+        key = barcode_mod.to_gtin14(item["barcode"]) or item["barcode"]
+        if key not in seen and len(results) < limit:
+            seen.add(key)
+            results.append(item)
+
+    for row in ProductRepository(session).search_local(query, limit):
+        if product_type and row.get("product_class") != product_type:
+            continue
+        if not str(row["barcode"]).isdigit():
+            continue
+        add(
+            _product_result(
+                barcode=str(row["barcode"]), name=row["name"], brand=row.get("brand"),
+                quantity=row.get("quantity"), image_url=row.get("image_url"),
+                category=row.get("category"), product_class=row.get("product_class"),
+                source="local", has_ingredients=bool((row.get("ingredients_text") or "").strip()),
+            )
+        )
+
+    # Only go upstream when our own table did not already fill the page: it is
+    # the slow, rate-limited part.
+    remote_available: Optional[bool] = None
+    if len(results) < limit:
+        records, remote_available = OpenFactsConnector().search(
+            query, limit=limit, sources=_PRODUCT_TYPES.get(product_type) if product_type else None
+        )
+        for record in records:
+            add(
+                _product_result(
+                    barcode=record.barcode, name=record.name or "", brand=record.brand,
+                    quantity=record.quantity, image_url=record.image_url, category=record.category,
+                    product_class=record.product_class, source=record.source or "off",
+                    has_ingredients=record.has_ingredients if record.ingredients_known else None,
+                )
+            )
+
+    # Nothing found *and* upstream unreachable is not "no such product".
+    if not results and remote_available is False:
+        raise HTTPException(status_code=503, detail="product search is currently unavailable")
+
+    return {
+        "action": "product.search",
+        "query": query,
+        "products": results,
+        "remote_available": remote_available,
     }
 
 

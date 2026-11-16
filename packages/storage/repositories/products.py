@@ -58,6 +58,30 @@ class ProductRepository:
             return None
         return {**dict(row), "parsed_ingredients": _loads(row["parsed_ingredients"], [])}
 
+    def search_local(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Products already in our table whose name or brand contains `query`.
+
+        LIKE wildcards in the query are escaped, so a user typing "50%" or "a_b"
+        searches for those characters rather than matching everything.
+        """
+        escaped = query.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        pattern = f"%{escaped}%"
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        rows = self.session.execute(
+            text(
+                "SELECT barcode, name, brand, category, quantity, image_url, product_class, "
+                "       source, ingredients_text "
+                "FROM product "
+                "WHERE barcode IS NOT NULL AND name IS NOT NULL AND name <> '' "
+                "  AND (expires_at IS NULL OR expires_at > :now) "
+                "  AND (name LIKE :p ESCAPE '!' OR brand LIKE :p ESCAPE '!') "
+                "ORDER BY confidence DESC, name "
+                "LIMIT :lim"
+            ),
+            {"p": pattern, "now": now, "lim": limit},
+        ).mappings().all()
+        return [dict(row) for row in rows]
+
     def upsert(
         self,
         *,

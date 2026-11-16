@@ -428,6 +428,96 @@ at the top level:
 * `quantity` / `image_url` only exist for products found in Open Food / Beauty /
   Products Facts; products read by OCR have them `null`.
 
+#### Barcode not found → add the product from its label
+
+A photo whose **barcode is read but is in no product database** no longer falls
+through to OCR (that produced random text when the photo was just a barcode).
+The scan returns a "product not found" answer instead:
+
+```jsonc
+{ "action": "scan", "product_found": false,
+  "verdict": "unidentified", "reason": "unlisted_product",
+  "next_action": "photograph_ingredient_panel",
+  "product": { "name": null, "brand": null, "quantity": null,
+               "barcode": "8901234567890", "image_url": null },
+  "identified_via": null, "score": null }
+```
+
+`product_found` is `true` for every analysed product and `false` here. `reason`
+is one of `unlisted_product` (barcode read, product unknown — or known by name
+but with no ingredient list on record), `non_retail_symbol` or `unreadable`.
+For `unlisted_product`, show "Product not found — scan its label to add the
+details", keep the `product.barcode`, and let the user photograph the label.
+
+**Second call — the label scan.** Same `scan` action, with the label photo and
+`label_scan: true`. OCR is allowed this time even if the photo also shows the
+barcode. Optionally send what the user typed:
+
+```jsonc
+{ "action": "scan", "scan_type": "product",
+  "label_scan": true,
+  "barcode": "8901234567890",     // optional, 6–14 digits — the one from the first response
+  "product_name": "Choco Bar",    // optional
+  "brand": "Acme" }               // optional
+// + the label photo as a multipart file part (or the usual attachments)
+```
+
+The result is a normal analysis (`identified_via: "ocr"`) and `product` carries
+the barcode / name / brand supplied. Details you type never override what a
+database returned. Without `label_scan: true`, `barcode`, `product_name` and
+`brand` are ignored. An invalid `barcode` is a `400`.
+
+⚠️ The analysis is for that scan only: the label details are **not** saved for
+other users (a wrong label must not change the answer for everyone), so
+scanning the same barcode again returns "not found" until it is in a database.
+
+A photo with **no** barcode (a label or ingredient panel) is read by OCR as
+before, and so is a non-product code such as a QR code (`non_retail_symbol`).
+
+#### Product search → analyse the product the user picks
+
+**1. Search by name — `product.search`**
+
+```jsonc
+{ "action": "product.search", "query": "amul butter",
+  "limit": 10,                    // optional, 1–20, default 10
+  "product_type": "food" }        // optional: "food" | "cosmetic" (default: both)
+```
+```jsonc
+{ "action": "product.search", "query": "amul butter", "remote_available": true,
+  "products": [
+    { "barcode": "8901262010153", "name": "amul butter", "brand": null, "quantity": "100 g",
+      "image_url": "https://images.openfoodfacts.org/…/front_en.3.200.jpg",
+      "category": "Dairies", "product_class": "food", "source": "off",
+      "has_ingredients": null } ] }
+```
+
+- `query` must be 2–100 characters (`400` otherwise). Debounce type-ahead (e.g.
+  ~400 ms) — upstream search is rate-limited.
+- Products we already know come first (`source: "local"`), then Open Food Facts
+  (`off`, food) and Open Beauty Facts (`obf`, cosmetics). Each product appears once.
+- `brand`, `quantity`, `image_url`, `category` can be `null`.
+- `has_ingredients`: `true`/`false` when known, **`null` when the source cannot
+  say** (food results from Open Food Facts never include ingredient text). Do not
+  treat `null` as "no ingredients".
+- `remote_available`: `false` means the public database could not be reached, so
+  the list may be incomplete (local results still return); `null` means we did
+  not need to ask it. `503 product search is currently unavailable` means nothing
+  could be searched at all — an **empty `products` list with `200` means no match**.
+
+**2. Analyse the chosen result — `scan` with the barcode and no photo**
+
+```jsonc
+{ "action": "scan", "scan_type": "product", "barcode": "8901262010153" }
+```
+
+This returns the same response as a photo scan: `verdict`, `payload.blocks`,
+`product`, `identified_via: "barcode"`, `score`, `product_found: true`. If the
+product has no ingredient list on record it returns `product_found: false`,
+`reason: "unlisted_product"` and `next_action: "photograph_ingredient_panel"` —
+continue with the label-scan step above. `barcode` must be 6–14 digits (`400`
+otherwise); it is ignored if a photo is also sent.
+
 ---
 
 ### 4.3 `upload` — ✅ store a file, get OCR text and a ready reply

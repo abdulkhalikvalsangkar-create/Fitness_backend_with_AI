@@ -258,7 +258,7 @@ def cache_probe(state: ConversationState, session: Session) -> tuple[Conversatio
     PRODUCT/RESTAURANT with new attachments. A hit short-circuits to compose."""
     if state.route is None:
         return state, None
-    if state.route.label in (RouteLabel.PRODUCT, RouteLabel.RESTAURANT) and state.input.attachments:
+    if _is_scan_turn(state):
         return state, None
     if state.route.label is RouteLabel.UNSAFE:
         return state, None
@@ -286,6 +286,18 @@ def cache_probe(state: ConversationState, session: Session) -> tuple[Conversatio
     if lookup.hit and lookup.payload is not None:
         return state, lookup.payload
     return state, None
+
+
+def _is_scan_turn(state: ConversationState) -> bool:
+    """A product/restaurant scan: its answer depends on the photo, barcode or
+    place — not on the (usually empty) message text the cache is keyed on.
+
+    Caching one would serve the previous scan's result to the next scan by the
+    same user, and a barcode-only lookup has no attachment to exempt it.
+    """
+    if state.route is None or state.route.label not in (RouteLabel.PRODUCT, RouteLabel.RESTAURANT):
+        return False
+    return bool(state.input.attachments or state.input.scan_type)
 
 
 def _cache_key_for(state: ConversationState):
@@ -568,7 +580,9 @@ def product_analyzer(state: ConversationState, session: Session) -> Conversation
     from packages.storage.blobs import BlobStore
 
     images = _load_attachment_bytes(state, session)
-    if not images:
+    hints = state.input.client_hints or {}
+    lookup_barcode = hints.get("barcode_lookup") if isinstance(hints.get("barcode_lookup"), str) else None
+    if not images and not lookup_barcode:
         state.draft.answer_blocks = [
             templates.product_unidentified_block(ProductUnidentifiedReason.UNREADABLE)
         ]
@@ -587,6 +601,9 @@ def product_analyzer(state: ConversationState, session: Session) -> Conversation
         context=state.context,
         attachment_ids=[a.attachment_id for a in state.input.attachments],
         scan_id=state.request.turn_id,
+        label_scan=bool(hints.get("label_scan")),
+        hint=hints.get("hint") if isinstance(hints.get("hint"), dict) else None,
+        barcode=None if images else lookup_barcode,
     )
     state.candidates.analyzer_result = analysis
 
@@ -887,7 +904,8 @@ def persist(state: ConversationState, session: Session) -> ConversationState:
     settings = get_settings()
 
     # arch.md 7.3: a cache hit is not re-stored, and flagged turns never cache.
-    if state.telemetry.cache_status is CacheTier.MISS and state.route is not None:
+    # Scan turns never cache either (see _is_scan_turn).
+    if state.telemetry.cache_status is CacheTier.MISS and state.route is not None and not _is_scan_turn(state):
         if state.route.label is not RouteLabel.UNSAFE:
             key = _cache_key_for(state)
             category = state.route.category
