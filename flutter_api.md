@@ -60,8 +60,8 @@ Read this section first — it's the reason this file exists.
    turn into the product-scan pipeline just because an attachment is present.
    See §4.1 and §4.3.
 7. **Restaurant scanning (`scan_type: "restaurant"`) is a stub.** Place
-   resolution only works if you pass a `place_id` — a restaurant name alone
-   always fails to resolve, and even a resolved place currently returns zero
+   resolves from a `place_id` (best) or from the restaurant name in `message`
+   (looked up via Google, or taken as typed if the lookup fails), and even a resolved place currently returns zero
    findings from all four evidence stages (regulatory, recalls, news,
    complaints — none are wired to a real data source yet). Don't build a
    "trust this result" UI around it yet. See §4.2.
@@ -325,7 +325,7 @@ await fetch(BASE, { method: "POST", headers: { Authorization: `Bearer ${jwt}` },
 | `scan_type` | recommended | `"product"` or `"restaurant"`. If omitted, legacy behaviour applies: any attachment selects product analysis; text alone with a restaurant/review-intent phrasing selects restaurant analysis. **Always send it explicitly** — see the routing change in §0 point 6. |
 | `file` | product: yes; restaurant: no (optional) | repeatable form field; also accepted under `files`/`image`/`images`/`attachment`/`attachments`. Several angles of one pack improve barcode confidence through multi-frame voting. |
 | `message` | product: no; restaurant: **yes, in practice** | for restaurant, this is the only query text the background investigation gets — put the restaurant name/place here |
-| `place_id` | restaurant only, and currently required for any result | see status note below |
+| `place_id` | restaurant only, optional — exact branch; without it the name in `message` is looked up | see status note below |
 
 Max **8 MB per file**, **5 files**, accepted MIME types: `image/jpeg`,
 `image/png`, `image/webp`, `image/heic`, `application/pdf`.
@@ -340,9 +340,11 @@ elapses, in which case you get a `504` with the pending job ids to poll via
 
 **Restaurant (`scan_type: "restaurant"`) — ⛔ not functionally ready.**
 Concretely, from `packages/restaurant/analyzer.py`:
-- Place resolution (`_resolve_place`) only succeeds if you pass `place_id`
-  directly. A restaurant name in `message` alone (no Places provider is wired
-  up yet) always fails to resolve, and the app receives:
+- Place resolution (`_resolve_place`) uses `place_id` when given. With only a
+  name in `message` it searches Google Places for the best match, and if that
+  is unavailable it carries on with the name as typed (`place.place_id` null,
+  summary says the branch could not be confirmed). It fails to resolve only
+  when there is no name at all, and the app then receives:
   *"I couldn't identify a specific branch for '&lt;query&gt;', so I can't
   report anything reliable about it."*
 - Even with a resolved `place_id`, all four evidence stages — regulatory
@@ -1053,7 +1055,7 @@ A 503 means the place provider is not configured or unreachable (an empty
 { "action": "scan", "scan_type": "restaurant", "place_id": "ChIJ…", "message": "Truffles" }
 ```
 
-Without a `place_id` nothing resolves and the result is `place_resolved: false`.
+Without a `place_id` the name in `message` is searched; `place_resolved` is false only if there is no name at all.
 
 `scan_job_results[0]` for a restaurant:
 

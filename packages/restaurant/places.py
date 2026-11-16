@@ -121,6 +121,37 @@ def search(
     return results
 
 
+def find(query: str) -> Optional[PlaceSuggestion]:
+    """Best single match for free text, or None (no key, no match, provider down).
+
+    Lets a scan that carries only a restaurant name resolve without the app
+    first calling `places.search`.
+    """
+    query = (query or "").strip()
+    if not query or not available():
+        return None
+    try:
+        response = get_broker().post(
+            f"{_BASE}/places:searchText",
+            headers=_headers("places.id,places.displayName,places.formattedAddress"),
+            content=json.dumps({"textQuery": query[:200], "pageSize": 1}).encode("utf-8"),
+            timeout=get_settings().places.timeout_seconds,
+        )
+        if response.status_code != 200:
+            logger.warning("places searchText HTTP %s", response.status_code)
+            return None
+        found = ((response.json() or {}).get("places") or [None])[0] or {}
+    except (FetchError, ValueError):
+        return None
+
+    name = (found.get("displayName") or {}).get("text")
+    if not found.get("id") or not name:
+        return None
+    return PlaceSuggestion(
+        place_id=str(found["id"]), name=str(name), address=found.get("formattedAddress")
+    )
+
+
 def details(place_id: str) -> Optional[PlaceSuggestion]:
     """Name and address for a chosen place, or None if it cannot be fetched."""
     if not available() or not place_id:

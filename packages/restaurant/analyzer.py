@@ -75,6 +75,10 @@ class ResolvedPlace:
 
     @property
     def resolved(self) -> bool:
+        return self.place_id is not None or self.name is not None
+
+    @property
+    def branch_confirmed(self) -> bool:
         return self.place_id is not None
 
 
@@ -114,6 +118,8 @@ class RestaurantReport:
                     f" I could not check {', '.join(self.stages_unavailable)}, so this is not "
                     "a complete picture."
                 )
+            if not self.place.branch_confirmed:
+                line += " I could not confirm which branch this is."
             return line
 
         by_kind: dict[str, int] = {}
@@ -212,8 +218,25 @@ class RestaurantAnalyzer:
                 )
             return ResolvedPlace(place_id=place_id, name=query, confidence=1.0)
 
-        logger.info("place resolution unavailable: no Places provider configured")
-        return ResolvedPlace()
+        query = (query or "").strip()
+        if not query:
+            return ResolvedPlace()
+
+        # No place_id: look the name up, and if that is not possible carry on
+        # with the name as typed. Low confidence either way, and the report
+        # says which branch could not be confirmed.
+        from packages.restaurant import places
+
+        found = places.find(query)
+        if found is not None:
+            return ResolvedPlace(
+                place_id=found.place_id,
+                name=found.name,
+                address=found.address,
+                confidence=0.7,
+            )
+        logger.info("place not matched by a Places provider; using the name as given")
+        return ResolvedPlace(name=query, confidence=0.4)
 
     def _regulatory(self, place: ResolvedPlace) -> tuple[list[Finding], bool]:
         """Health-inspection open data; India: FoSCoS/FSSAI licence status.
