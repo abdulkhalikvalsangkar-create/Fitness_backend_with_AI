@@ -102,6 +102,10 @@ class RestaurantReport:
     def no_adverse_findings(self) -> bool:
         return not self.scored_findings
 
+    @property
+    def _evidence_checked(self) -> bool:
+        return any(stage != "place resolution" for stage in self.stages_completed)
+
     def summary_line(self) -> str:
         """Signals stated as signals. Never a verdict about current conditions."""
         if not self.place.resolved:
@@ -109,6 +113,17 @@ class RestaurantReport:
                 f"I couldn't identify a specific branch for '{self.query}', so I can't "
                 "report anything reliable about it."
             )
+
+        if self.no_adverse_findings and not self._evidence_checked:
+            # Nothing but place resolution ran. "No adverse findings" would
+            # read as reassurance about a place that was never examined.
+            line = (
+                f"I couldn't check any safety records for {self.place.name} yet, "
+                "so I can't say anything about it either way."
+            )
+            if not self.place.branch_confirmed:
+                line += " I also could not confirm which branch this is."
+            return line
 
         if self.no_adverse_findings:
             checked = ", ".join(self.stages_completed) or "the sources available"
@@ -136,10 +151,13 @@ class RestaurantReport:
                 piece += f" ({unverified} unverified)"
             parts.append(piece)
 
-        return (
+        line = (
             f"For {self.place.name} I found {', '.join(parts)}. "
             "These are reports on record, not a judgement about conditions today."
         )
+        if any(f.scope is FindingScope.BRAND for f in self.scored_findings):
+            line += " Some concern the brand generally and may not involve this branch."
+        return line
 
     def to_blocks(self) -> list[dict[str, Any]]:
         """Machine-readable payload. Every finding carries its source and date."""
@@ -251,7 +269,34 @@ class RestaurantAnalyzer:
         return [], False
 
     def _news(self, place: ResolvedPlace) -> tuple[list[Finding], bool]:
-        return [], False
+        """Headlines reporting an incident or controversy involving the place.
+
+        Bound to the brand, not the branch: a headline rarely names a branch
+        reliably, and an unbound finding must not be presented as this
+        branch's. Reported, unverified, with outlet, date and link.
+        """
+        from packages.restaurant import news
+
+        items, answered = news.search(place.name or "")
+        if not answered:
+            return [], False
+
+        findings = []
+        for item in items:
+            outlet = f" ({item.outlet})" if item.outlet else ""
+            findings.append(
+                Finding(
+                    kind=FindingKind(item.kind),
+                    scope=FindingScope.BRAND,
+                    summary=f"News report: {item.title}{outlet}",
+                    source=item.outlet or "Google News",
+                    url=item.url,
+                    occurred_on=item.published,
+                    verified=False,
+                    severity=item.severity,
+                )
+            )
+        return findings, True
 
     def _complaints(self, place: ResolvedPlace) -> tuple[list[Finding], bool]:
         """Review-corpus mining for illness/hygiene signals.

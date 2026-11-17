@@ -461,6 +461,7 @@ def investigate_restaurant(ctx: JobContext) -> dict[str, Any]:
     return {
         "query": query,
         "place_resolved": report.place.resolved,
+        "branch_confirmed": report.place.branch_confirmed,
         "place": {
             "place_id": report.place.place_id,
             "name": report.place.name,

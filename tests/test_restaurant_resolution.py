@@ -3,7 +3,7 @@
 import unittest
 from unittest import mock
 
-from packages.restaurant import places
+from packages.restaurant import news, places
 from packages.restaurant.analyzer import RestaurantAnalyzer
 
 
@@ -19,6 +19,7 @@ class RestaurantResolutionTests(unittest.TestCase):
         for target in (
             mock.patch.object(places, "get_broker", return_value=self.broker),
             mock.patch.object(places, "available", return_value=True),
+            mock.patch.object(news, "search", return_value=([], False)),  # never the live feed
         ):
             target.start()
             self.addCleanup(target.stop)
@@ -59,6 +60,13 @@ class RestaurantResolutionTests(unittest.TestCase):
         report = RestaurantAnalyzer().analyze("typed", place_id="P2")
         self.assertEqual(report.place.name, "Real Name")
         self.broker.post.assert_not_called()
+
+    def test_nothing_checked_is_not_reported_as_no_adverse_findings(self) -> None:
+        with mock.patch.object(places, "available", return_value=False):
+            line = RestaurantAnalyzer().analyze("Mc Donald's").summary_line()
+        self.assertNotIn("No adverse findings", line)
+        self.assertIn("can't say anything", line)
+        self.assertIn("could not confirm which branch", line)
 
     def test_blank_query_stays_unresolved(self) -> None:
         self.assertFalse(RestaurantAnalyzer().analyze("  ").place.resolved)

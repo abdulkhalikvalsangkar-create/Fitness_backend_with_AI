@@ -61,9 +61,9 @@ Read this section first — it's the reason this file exists.
    See §4.1 and §4.3.
 7. **Restaurant scanning (`scan_type: "restaurant"`) is a stub.** Place
    resolves from a `place_id` (best) or from the restaurant name in `message`
-   (looked up via Google, or taken as typed if the lookup fails), and even a resolved place currently returns zero
-   findings from all four evidence stages (regulatory, recalls, news,
-   complaints — none are wired to a real data source yet). Don't build a
+   (looked up via Google, or taken as typed if the lookup fails), and only the **news** evidence stage is live (headlines
+   reporting an incident or controversy, from Google News). Regulatory,
+   recalls and complaints are not wired to a data source yet. Don't build a
    "trust this result" UI around it yet. See §4.2.
 8. **Ingredient rows can be `"draft"` (unreviewed).** A newly discovered
    ingredient is written to the database as `draft` and, depending on an
@@ -347,10 +347,14 @@ Concretely, from `packages/restaurant/analyzer.py`:
   when there is no name at all, and the app then receives:
   *"I couldn't identify a specific branch for '&lt;query&gt;', so I can't
   report anything reliable about it."*
-- Even with a resolved `place_id`, all four evidence stages — regulatory
-  records, recall notices, news, public complaints — are stubs that always
-  return "no data, stage unavailable." There is currently no real source
-  wired for any of them.
+- The **news** stage is live: it returns recent headlines (last 2 years) that
+  name the restaurant and report an incident (food poisoning, licence
+  suspended, raid, hygiene lapse, lawsuit, recall, controversy). Each finding
+  has `kind`, `summary` ("News report: ..."), `source` (outlet), `url`, `date`,
+  `verified: false`, `scope: "brand"`. If the news feed can't be reached the
+  stage is listed in `stages_unavailable`, not treated as "no news".
+  Regulatory records, recall notices and public complaints are still stubs
+  that return "stage unavailable".
 - There is no equivalent of the product pipeline's draft/publish review gate
   for restaurant findings (a setting for this exists at the database level —
   `review_status_control_of_restaurant` — but nothing yet uses it to hold
@@ -1072,9 +1076,9 @@ Without a `place_id` the name in `message` is searched; `place_resolved` is fals
                  "counts_towards_assessment": true }] }
 ```
 
-⚠️ **The four evidence stages (regulatory records, recall notices, news, public
-complaints) have no data source connected yet.** Today they are always listed in
-`stages_unavailable` and `findings` is empty. Show them as "not checked", never
+⚠️ **Only the news stage has a data source.** Regulatory records, recall notices
+and public complaints are always in `stages_unavailable`. `findings` can hold
+news items (reported, unverified, brand-level). Show unavailable stages as "not checked", never
 as "all clear": `no_adverse_findings: true` with unavailable stages means
 "nothing was checked", not "nothing was found".
 
