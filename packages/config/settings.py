@@ -172,13 +172,15 @@ class ModelSettings:
     # reached only when the one before it fails or its circuit breaker is open.
     #
     # This is ordered preference, not availability: a provider named here
-    # without a key is skipped. Leaving it unset used to mean "whichever key
-    # happens to be set, OpenAI first" — which silently sent every call to
-    # OpenAI on a host that also had a DeepSeek key, regardless of intent.
+    # without a key is skipped. DeepSeek goes first because this deployment's
+    # OpenAI project does not have access to the configured model (every call
+    # was failing permanently before falling back) -- see LARGE_MODEL/
+    # SMALL_MODEL below. Override with the PROVIDER_ORDER env var if that
+    # OpenAI project ever gets model access and OpenAI should lead again.
     provider_order: tuple[str, ...] = field(
         default_factory=lambda: tuple(
             p.strip().lower()
-            for p in _env("PROVIDER_ORDER", "openai,deepseek,huggingface").split(",")
+            for p in _env("PROVIDER_ORDER", "deepseek,openai,huggingface").split(",")
             if p.strip()
         )
     )

@@ -74,6 +74,16 @@ Read this section first — it's the reason this file exists.
    response shape is stable and safe to build against, but read §4.5's
    note on the model before presenting its number as authoritative in the
    UI.
+10. **(2026-11-18) A scan result can now carry a plain-language "why" block.**
+    `payload.blocks` may include one extra block at the very front —
+    `{ block_id: "explain_1", type: "text", text: "<paragraph>" }` — a few
+    sentences explaining *why* the verdict is what it is. Until today this
+    was being generated on some scans and silently dropped on others (any
+    scan where unresolved ingredients triggered background chemical
+    research never got it, which was most real-world scans); that's now
+    fixed so it behaves consistently. `ingredient_table` rows can also carry
+    a new optional `explanation` string from the same pass. Full format,
+    and exactly when each is present or absent, in §5.
 
 ---
 
@@ -1201,6 +1211,60 @@ route produced it.
 | `safety_notice` | `text`, `data.kind` | prominent notice — see below |
 | `action_prompt` | `data.flags[]` | call-to-action / highlighted list |
 
+### `explain_1` — the "why" block (added 2026-11-18)
+
+A scan response's `payload.blocks[]` may contain one extra block, always
+first in the array (before `product_1`, `verdict_1`, etc.):
+
+```jsonc
+{
+  "block_id": "explain_1",
+  "type": "text",
+  "text": "No personal flags were raised for you in these findings. Two ingredients are flagged at a moderate hazard level and are listed as restricted in the EU: Sodium Benzoate and Phenoxyethanol. For both, the findings note that they are permitted only below a concentration limit, and the label does not state the concentration. ...",
+  "data": {}
+}
+```
+
+Read `text` and render it as the lead paragraph, above the `hazard_badge`.
+There is nothing else to parse out of it — it is one plain-language
+paragraph (max ~1200 characters), already written for a non-expert reader,
+narrating the same hazards `ingredient_table`/`hazard_badge` already carry
+as data. It never introduces a verdict, hazard level, or ingredient that
+isn't already in the structured blocks — treat it as explanatory copy, not
+a new source of truth.
+
+**It is not always present — code defensively, same as any other optional
+block:**
+- Absent when the rules engine found no hazard-flagged ingredient at all
+  (nothing to explain).
+- Absent if no model provider answered in time (rate limits, timeouts,
+  provider downtime) — a scan never blocks or fails because of this, it
+  just ships without the paragraph that turn.
+- **Until 2026-11-18 it was also absent whenever the scan needed background
+  chemical research** (i.e. whenever `pending_jobs` was non-empty on the
+  first response) — that was a bug, not an availability signal, and is now
+  fixed. If you built any UI logic keyed on "no `explain_1` this turn", drop
+  it; the only two reasons left are the two bullets above.
+
+Separately, `ingredient_table` rows (§5, `rows[]`) may each carry one more
+optional field from the same pass:
+
+```jsonc
+{
+  "name": "Sodium Benzoate",
+  // ...all the fields already documented above, plus:
+  "explanation": "Flagged at a moderate hazard level and listed as restricted in the EU. The findings state that it is permitted only below a concentration limit, and that the label does not state the concentration."
+}
+```
+
+`explanation` is per-ingredient plain-language colour, matched to the row by
+name — present only on the handful of rows the model chose to comment on
+(not every row, and never on an unresolved/unrecognised row), absent (field
+missing entirely, not an empty string) everywhere else. Show it as
+secondary/expandable text under the row if you show it at all; `hazard_level`
+and `personal_flags` on the same row remain the fields that drive colour and
+sort order.
+
 ### Verdicts — exactly four values, a fixed enum from the rules engine
 
 | `data.verdict` | suggested colour |
@@ -1343,7 +1407,7 @@ own boilerplate on top.
 ```
 1. capture 1-3 frames of the pack (barcode side + ingredients panel)
 2. multipart POST: action=scan, scan_type=product, file (repeated)
-3. render hazard_badge -> personal_flags -> ingredient_table (watch review_label)
+3. render explain_1 (if present) -> hazard_badge -> personal_flags -> ingredient_table (watch review_label)
 4. if pending_jobs, show the job_pending note; poll job_status, don't hammer it
 ```
 
@@ -1375,6 +1439,7 @@ own boilerplate on top.
 | **Don't poll `job_status` in a tight loop.** | Rate limit is 30/min; chemical research takes 10–60s in the background. |
 | **Don't sign JWTs in the app, or send a `user_id` field to select whose data to read.** | Identity comes only from the bearer token. |
 | **Set a 60s+ client timeout for `scan`.** | 20–30s is normal for product scans. |
+| **Don't key any logic on whether `explain_1` is present.** | It's optional copy (§5), not an availability/status signal — absent just means no hazard to explain, or the model didn't answer in time that turn. |
 | **Log `request_id`.** | It's how anything gets diagnosed server-side. |
 
 ---
