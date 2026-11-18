@@ -19,7 +19,8 @@ from pydantic import BaseModel, Field
 
 from packages.chains.base import Chain
 from packages.chains.providers import DataPolicy, ModelClass
-from packages.domain.models import ProductAnalysis
+from packages.domain.enums import BlockType
+from packages.domain.models import AnswerBlock, ProductAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -169,3 +170,35 @@ class ProductExplainer(Chain):
                 logger.warning("explanation named unknown ingredient %r; dropped", note.name)
         explanation.ingredient_notes = kept
         return explanation
+
+
+def attach_explanation(blocks: list[AnswerBlock], analysis: ProductAnalysis) -> list:
+    """Run the explanation layer and splice its output into already-built
+    product blocks, in place.
+
+    Shared by the synchronous scan path (`nodes.product_analyzer`) and the
+    `product_scan` background job rerun (`jobs.handlers.rerun_product_scan`).
+    The job handler used to call `product_blocks()` directly and skip this
+    entirely, so any scan with unresolved ingredients -- which is what sends
+    it through the background job in the first place -- never got narrated.
+    """
+    from packages.chains.providers import is_configured
+
+    if not (is_configured() and analysis.hazards):
+        return []
+
+    explainer = ProductExplainer()
+    explanation = explainer.explain(analysis)
+
+    if explanation is not None:
+        blocks.insert(0, AnswerBlock(block_id="explain_1", type=BlockType.TEXT, text=explanation.overall))
+        if explanation.ingredient_notes:
+            table = next((b for b in blocks if b.type is BlockType.INGREDIENT_TABLE), None)
+            if table is not None:
+                notes = {n.name.lower(): n.note for n in explanation.ingredient_notes}
+                for row in table.data.get("rows", []):
+                    note = notes.get(str(row.get("name", "")).lower())
+                    if note:
+                        row["explanation"] = note
+
+    return explainer.costs

@@ -634,33 +634,13 @@ def product_analyzer(state: ConversationState, session: Session) -> Conversation
 
     # arch.md 8.6: the LLM's only job is the explanation layer. It narrates the
     # findings the rules produced; it cannot change the verdict, and _strip_
-    # hallucinated + guard_out both re-check what it named.
-    from packages.chains.providers import is_configured
+    # hallucinated + guard_out both re-check what it named. Shared with the
+    # `product_scan` background job rerun so a scan that needed chemical
+    # research still gets narrated (see attach_explanation's docstring).
+    from packages.chains.explain import attach_explanation
 
-    if is_configured() and analysis.hazards:
-        from packages.chains.explain import ProductExplainer
-
-        explainer = ProductExplainer()
-        explanation = explainer.explain(analysis)
-        for completion in explainer.costs:
-            state.telemetry.token_costs.append(completion.to_cost("product_explain"))
-
-        if explanation is not None:
-            state.draft.answer_blocks.insert(
-                0, templates.text_block("explain_1", explanation.overall)
-            )
-            if explanation.ingredient_notes:
-                table = next(
-                    (b for b in state.draft.answer_blocks
-                     if b.type is BlockType.INGREDIENT_TABLE),
-                    None,
-                )
-                if table is not None:
-                    notes = {n.name.lower(): n.note for n in explanation.ingredient_notes}
-                    for row in table.data.get("rows", []):
-                        note = notes.get(str(row.get("name", "")).lower())
-                        if note:
-                            row["explanation"] = note
+    for completion in attach_explanation(state.draft.answer_blocks, analysis):
+        state.telemetry.token_costs.append(completion.to_cost("product_explain"))
 
     if analysis.unresolved_count:
         state.flags.data_gaps.append(

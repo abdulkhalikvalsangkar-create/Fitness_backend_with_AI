@@ -83,6 +83,7 @@ def rerun_product_scan(ctx: JobContext) -> dict[str, Any]:
         hint=ctx.payload.get("hint") if isinstance(ctx.payload.get("hint"), dict) else None,
         barcode=barcode if isinstance(barcode, str) and not images else None,
     )
+    from packages.chains.explain import attach_explanation
     from packages.orchestrator.templates import product_blocks
     from packages.product.summary import product_summary
 
@@ -90,12 +91,18 @@ def rerun_product_scan(ctx: JobContext) -> dict[str, Any]:
         row["job_id"] for row in dependencies if row["status"] == "failed"
     ]
 
+    blocks = product_blocks(analysis)
+    # Without this, a scan that needed chemical research (i.e. every scan
+    # that reaches this handler at all) finalises through product_blocks()
+    # alone and never gets the LLM narration the synchronous path has.
+    attach_explanation(blocks, analysis)
+
     return {
         "status": "completed",
         "scan_type": "product",
         "analysis": analysis.model_dump(mode="json"),
         **product_summary(analysis),
-        "blocks": [block.model_dump(mode="json") for block in product_blocks(analysis)],
+        "blocks": [block.model_dump(mode="json") for block in blocks],
         "failed_dependencies": failed_dependencies,
         "trace": trace.__dict__,
     }
