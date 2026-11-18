@@ -40,6 +40,13 @@ logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     handlers=_log_handlers,
+    # Without this, basicConfig() is a silent no-op whenever the root logger
+    # already has a handler attached -- which happens the moment ANY import
+    # before this line makes a bare logging.warning()/.info() call (plenty of
+    # dependencies do this), since that alone auto-configures the root logger.
+    # This is exactly how the file got created but stayed empty: the handler
+    # object existed, it was just never actually wired in.
+    force=True,
 )
 logger = logging.getLogger("api")
 logger.info("logging to %s", settings.log_file)
