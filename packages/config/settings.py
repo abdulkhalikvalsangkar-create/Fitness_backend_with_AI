@@ -396,6 +396,12 @@ class Settings:
     env: str = field(default_factory=lambda: _env("APP_ENV", "production"))
     debug: bool = field(default_factory=lambda: _env_bool("APP_DEBUG", False))
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))
+    # cPanel/Passenger's capture of stdout/stderr is not reliably reachable by
+    # the hosting account, so every log line also goes to a plain file here —
+    # independent of whatever Passenger does with the process's own streams.
+    log_file: Path = field(
+        default_factory=lambda: Path(_env("LOG_FILE", str(ROOT / "var" / "logs" / "app.log")))
+    )
     root: Path = ROOT
 
     # Bumping either invalidates every cache entry that used them (arch.md 7.2).

@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from logging.handlers import RotatingFileHandler
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request, status
@@ -24,11 +25,24 @@ from packages.storage.db import ping, server_info, session_scope
 
 settings = get_settings()
 
+_log_handlers: list[logging.Handler] = [logging.StreamHandler()]
+try:
+    settings.log_file.parent.mkdir(parents=True, exist_ok=True)
+    _log_handlers.append(
+        RotatingFileHandler(settings.log_file, maxBytes=5_000_000, backupCount=3)
+    )
+except OSError:
+    # Read-only filesystem or permission issue: stderr (captured by Passenger
+    # regardless) is still there, so logging keeps working either way.
+    pass
+
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=_log_handlers,
 )
 logger = logging.getLogger("api")
+logger.info("logging to %s", settings.log_file)
 
 app = FastAPI(
     title="Health & Product Assistant",
