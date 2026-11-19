@@ -95,6 +95,7 @@ class BlockType(StrEnum):
     ACTION_PROMPT = "action_prompt"
     JOB_PENDING = "job_pending"
     SAFETY_NOTICE = "safety_notice"
+    PROS_CONS = "pros_cons"
 
 
 class ProductUnidentifiedReason(StrEnum):

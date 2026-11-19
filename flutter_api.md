@@ -84,6 +84,12 @@ Read this section first — it's the reason this file exists.
     fixed so it behaves consistently. `ingredient_table` rows can also carry
     a new optional `explanation` string from the same pass. Full format,
     and exactly when each is present or absent, in §5.
+11. **(2026-11-19) New `pros_cons_1` block.** Right after `explain_1`, a
+    `{ block_id: "pros_cons_1", type: "pros_cons", data: { pros: [...],
+    cons: [...] } }` block — a short bulleted pros/cons list, grounded in
+    the same findings as the summary. Works the same way whether the
+    product was identified by barcode or the scan was label-only with no
+    product name. Full format in §5.
 
 ---
 
@@ -1210,6 +1216,7 @@ route produced it.
 | `job_pending` | `data.job_ids`, `data.poll_action` | "working on it" note |
 | `safety_notice` | `text`, `data.kind` | prominent notice — see below |
 | `action_prompt` | `data.flags[]` | call-to-action / highlighted list |
+| `pros_cons` | `data.pros[]`, `data.cons[]` | Pros/Cons card (see below) |
 
 ### `explain_1` — the "why" block (added 2026-11-18)
 
@@ -1264,6 +1271,45 @@ missing entirely, not an empty string) everywhere else. Show it as
 secondary/expandable text under the row if you show it at all; `hazard_level`
 and `personal_flags` on the same row remain the fields that drive colour and
 sort order.
+
+### `pros_cons_1` — a Pros/Cons section (added 2026-11-19)
+
+A new block, from the same explanation pass, placed right after `explain_1`
+(so the order at the front of `payload.blocks[]` is: `explain_1`,
+`pros_cons_1`, then the rest):
+
+```jsonc
+{
+  "block_id": "pros_cons_1",
+  "type": "pros_cons",
+  "text": null,
+  "data": {
+    "pros": [
+      "Aqua has a low hazard level.",
+      "Glycerin has no hazard level."
+    ],
+    "cons": [
+      "Sodium Benzoate has a moderate hazard level and is restricted in the EU.",
+      "Sodium Benzoate's concentration limit is not stated on the label.",
+      "Limonene is an allergen."
+    ]
+  }
+}
+```
+
+Render it as its own "Pros / Cons" card or two-column section, right under
+the summary paragraph. Both `pros` and `cons` are flat arrays of short
+headline strings (not sentences to parse further) — render each as one
+bullet, in the order given. Up to 5 items per list; either list can be
+empty (e.g. an entirely clean panel has no `cons`, or a panel with nothing
+but hazard-flagged ingredients has no `pros`) — treat a missing/empty array
+as "nothing to show there," not an error.
+
+Same availability rule as `explain_1`, and they always appear or are absent
+together: no hazard-flagged ingredient at all → no block; model didn't
+answer in time that turn → no block. When there is no identified product
+(a label-only scan with no barcode match), the bullets are about the
+ingredients only — never a guess at the product's name, brand or category.
 
 ### Verdicts — exactly four values, a fixed enum from the rules engine
 
@@ -1407,7 +1453,7 @@ own boilerplate on top.
 ```
 1. capture 1-3 frames of the pack (barcode side + ingredients panel)
 2. multipart POST: action=scan, scan_type=product, file (repeated)
-3. render explain_1 (if present) -> hazard_badge -> personal_flags -> ingredient_table (watch review_label)
+3. render explain_1 -> pros_cons_1 (both if present) -> hazard_badge -> personal_flags -> ingredient_table (watch review_label)
 4. if pending_jobs, show the job_pending note; poll job_status, don't hammer it
 ```
 
@@ -1439,7 +1485,7 @@ own boilerplate on top.
 | **Don't poll `job_status` in a tight loop.** | Rate limit is 30/min; chemical research takes 10–60s in the background. |
 | **Don't sign JWTs in the app, or send a `user_id` field to select whose data to read.** | Identity comes only from the bearer token. |
 | **Set a 60s+ client timeout for `scan`.** | 20–30s is normal for product scans. |
-| **Don't key any logic on whether `explain_1` is present.** | It's optional copy (§5), not an availability/status signal — absent just means no hazard to explain, or the model didn't answer in time that turn. |
+| **Don't key any logic on whether `explain_1`/`pros_cons_1` is present.** | Both are optional copy (§5), not an availability/status signal — absent just means no hazard to explain, or the model didn't answer in time that turn. They appear or are absent together. |
 | **Log `request_id`.** | It's how anything gets diagnosed server-side. |
 
 ---

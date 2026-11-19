@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
+from typing import Annotated, Optional
 
 from pydantic import BaseModel, Field
 
@@ -30,9 +30,20 @@ class IngredientNote(BaseModel):
     note: str = Field(max_length=400)
 
 
+# A short headline, not a sentence -- the list is rendered as bullets, so each
+# entry is capped tighter than a note's prose. The list itself is uncapped
+# here and trimmed in code (see attach_explanation) rather than failing
+# validation over a model that returned one extra bullet.
+_ProsConsItem = Annotated[str, Field(max_length=160)]
+
+MAX_PROS_CONS_ITEMS = 5
+
+
 class ProductExplanation(BaseModel):
     overall: str = Field(max_length=1200)
     ingredient_notes: list[IngredientNote] = Field(default_factory=list)
+    pros: list[_ProsConsItem] = Field(default_factory=list)
+    cons: list[_ProsConsItem] = Field(default_factory=list)
 
 
 SYSTEM = """You explain product ingredient analysis to a non-expert.
@@ -52,6 +63,21 @@ Absolute rules:
 - Plain language. No marketing tone, no reassurance that the findings do not
   support, no alarm the findings do not support.
 - Personal flags matter most to this reader: lead with them when present.
+
+You also produce a short "pros" and "cons" list, grounded in the same rules
+as everything above -- each a short headline (under 160 characters), not a
+sentence, up to 5 each:
+- `cons`: hazard-flagged, restricted, banned, allergen or personally-flagged
+  ingredients; a concentration caveat; and, if a meaningful number of
+  ingredients could not be identified at all, say so as its own con (e.g.
+  "6 ingredients on the label could not be identified").
+- `pros`: ingredients with a low/none hazard level and no personal flag; the
+  overall absence of banned or restricted substances; nothing else. Do not
+  invent a nutritional or health benefit the findings do not state.
+- If `product` below is null, this is a label-only scan with no identified
+  product -- write pros/cons about the ingredients only. Never guess the
+  product's name, brand or category.
+- Either list may be empty (e.g. no cons at all for an entirely clean panel).
 
 Write British English, second person, calm and factual."""
 
@@ -200,5 +226,18 @@ def attach_explanation(blocks: list[AnswerBlock], analysis: ProductAnalysis) -> 
                     note = notes.get(str(row.get("name", "")).lower())
                     if note:
                         row["explanation"] = note
+
+        pros = explanation.pros[:MAX_PROS_CONS_ITEMS]
+        cons = explanation.cons[:MAX_PROS_CONS_ITEMS]
+        if pros or cons:
+            # Right after explain_1 (position 0), so: pros_cons, explain, ...
+            blocks.insert(
+                1,
+                AnswerBlock(
+                    block_id="pros_cons_1",
+                    type=BlockType.PROS_CONS,
+                    data={"pros": pros, "cons": cons},
+                ),
+            )
 
     return explainer.costs
