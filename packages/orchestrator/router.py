@@ -208,6 +208,18 @@ class Router:
                 category=FaqCategory.PRODUCT,
             )
 
+        # `handle_chat` prefixes the text of an uploaded document to the
+        # question. That is a question about the user's own document, whatever
+        # the question's wording ("summarise this report" reads like small talk
+        # to a classifier that cannot see the document).
+        if normalised.startswith("user uploaded document text"):
+            return RouteDecision(
+                label=RouteLabel.PERSONAL,
+                confidence=0.95,
+                stage=RouteStage.S0_RULES,
+                rationale="question about an uploaded document",
+            )
+
         if not normalised:
             return RouteDecision(
                 label=RouteLabel.SMALLTALK,

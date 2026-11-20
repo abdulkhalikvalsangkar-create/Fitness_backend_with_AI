@@ -572,14 +572,20 @@ fd.append("file", blob, "report.jpg");
 }
 ```
 
-What happens server-side, automatically, per file: OCR runs (an external OCR
-service, cached by content hash), then — if OCR produced text — an LLM pass
+What happens server-side, automatically, per file: for a **PDF** the text
+inside it is read directly (scanned PDFs are rendered and OCRed when that is
+installed); for an image, OCR runs (an external OCR service, cached by content
+hash). Then — if OCR produced text — an LLM pass
 cleans the raw OCR text (fixes scan artefacts, never invents values) and
 drafts `response`, a short reply describing what the document contains.
-**Both `extracted_text` and `response` are `null`/absent if OCR found nothing
-readable or the file isn't the kind of document with text on it** (e.g. a
-photo of a barcode) — this is normal, not an error; don't treat it as a
-failed upload.
+**Both `extracted_text` and `response` are `null`/absent if nothing readable
+was found or the file isn't the kind of document with text on it** (e.g. a
+photo of a barcode) — this is not an upload failure. Each attachment also has
+`extraction_status` (`"ok"`, `"empty"` or `"failed"`) and `extraction_error`
+(a plain-language reason, e.g. a password-protected or damaged PDF) so the app
+can tell the user why. If `chat` references a **PDF** that has no readable
+text, it returns HTTP **422** with that reason instead of a generic reply.
+A PDF uploaded earlier without text is read again when `chat` first uses it.
 
 The stored `extracted_text` is what a later `chat` call automatically
 surfaces as context if you reference the same `attachment_id` (§4.1).

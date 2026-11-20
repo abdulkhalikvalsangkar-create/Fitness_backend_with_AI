@@ -297,6 +297,12 @@ def handle_chat(body: dict, principal: Principal, session: Session) -> dict[str,
         for item in raw_attachments:
             attachment_id = (item or {}).get("attachment_id") if isinstance(item, dict) else None
             extracted = blob_store.get_extracted_text(attachment_id, principal.user_id) if attachment_id else None
+            if not extracted and attachment_id:
+                extracted, unreadable = _read_document_now(blob_store, attachment_id, principal, session)
+                if unreadable:
+                    # A document the user asked about that cannot be read must
+                    # not fall through to small talk.
+                    raise HTTPException(status_code=422, detail=unreadable)
             if extracted:
                 doc_texts.append(extracted)
             else:
@@ -617,6 +623,8 @@ def handle_upload(body: dict, principal: Principal, session: Session) -> dict[st
         declared = item.get("mime_type") if isinstance(item, dict) else None
         extracted_text: Optional[str] = None
         document_response: Optional[str] = None
+        extraction_status = "empty"
+        extraction_error: Optional[str] = None
 
         try:
             if isinstance(item, dict) and isinstance(item.get("bytes"), (bytes, bytearray)):
@@ -633,16 +641,26 @@ def handle_upload(body: dict, principal: Principal, session: Session) -> dict[st
             )
 
             try:
-                from packages.product.ocr import OcrService
+                from packages.product.documents import extract_document
 
-                result = OcrService(session).read(raw)
-                if result and result.ok and result.text.strip():
-                    extracted_text = result.text
+                # A repeat upload of the same file reuses the text already kept
+                # for it instead of reading it again.
+                previous = store.get_extracted_text(blob.blob_id, principal.user_id) if blob.deduplicated else None
+                extraction = extract_document(raw, session) if not previous else None
+                if previous:
+                    extracted_text = previous
+                    extraction_status = "ok"
+                elif extraction is not None:
+                    extraction_status = extraction.status
+                    extraction_error = extraction.error
+
+                if extraction is not None and extraction.ok:
+                    extracted_text = extraction.text
 
                     try:
                         from packages.chains.document_summary import DocumentSummaryChain
 
-                        summary = DocumentSummaryChain().summarise(result.text)
+                        summary = DocumentSummaryChain().summarise(extraction.text)
                         if summary is not None:
                             if summary.cleaned_text.strip():
                                 extracted_text = summary.cleaned_text
@@ -655,6 +673,7 @@ def handle_upload(body: dict, principal: Principal, session: Session) -> dict[st
                     store.set_extracted_text(blob.blob_id, extracted_text)
             except Exception:
                 logger.exception("ocr extraction failed for uploaded blob %s", blob.blob_id)
+                extraction_status, extraction_error = "failed", "the document could not be processed"
         except ValueError as exc:
             # One bad attachment must not sink the others.
             errors.append({"index": index, "error": str(exc)})
@@ -669,6 +688,10 @@ def handle_upload(body: dict, principal: Principal, session: Session) -> dict[st
                 "deduplicated": blob.deduplicated,
                 "extracted_text": extracted_text,
                 "response": document_response,
+                # Why `extracted_text` is null, so the app can say so instead of
+                # guessing: "ok" | "empty" (nothing to read) | "failed" (see error).
+                "extraction_status": extraction_status,
+                "extraction_error": extraction_error,
             }
         )
 
@@ -683,6 +706,38 @@ def handle_upload(body: dict, principal: Principal, session: Session) -> dict[st
     top_response = next((s["response"] for s in stored if s.get("response")), None)
 
     return {"action": "upload", "attachments": stored, "errors": errors, "response": top_response}
+
+
+def _read_document_now(
+    blob_store: Any, attachment_id: str, principal: Principal, session: Session
+) -> tuple[Optional[str], Optional[str]]:
+    """Extract text for an attachment that was stored without any.
+
+    Covers files uploaded before extraction worked. Returns (text, None) on
+    success, (None, reason) for a PDF that cannot be read, and (None, None) for
+    anything else (an image with no text is left to the normal routes).
+    """
+    from packages.product.documents import extract_document
+
+    blob = blob_store.get(attachment_id, principal.user_id)
+    if blob is None:
+        return None, None
+    try:
+        raw = blob.read()
+    except OSError:
+        return None, None
+
+    extraction = extract_document(raw, session)
+    if extraction.ok:
+        blob_store.set_extracted_text(attachment_id, extraction.text)
+        return extraction.text, None
+    if blob.mime_type == "application/pdf":
+        return None, (
+            "I couldn't read any text from this PDF"
+            + (f": {extraction.error}" if extraction.error else "")
+            + ". Try uploading a clearer copy or a photo of the pages."
+        )
+    return None, None
 
 
 def _materialise_attachments(

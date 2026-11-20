@@ -54,3 +54,5 @@ joblib==1.6.0
 python-dateutil==2.9.0.post0
 pytz==2026.1
 tzdata==2026.1
+
+pypdf>=4.0                      # reads the text layer of uploaded PDF reports (pure Python)
